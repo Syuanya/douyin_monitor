@@ -12,7 +12,8 @@ MISSING_RUNTIME_DEPS = [
 ]
 
 if not MISSING_RUNTIME_DEPS:
-    from app.core.content_monitor.douyin_content_monitor import DouyinContentMonitorManager
+    from app.core.content_monitor.douyin_content_monitor import DouyinContentItem, DouyinContentMonitorManager
+    from app.core.storage.sqlite_store import SQLiteStore
 
 
 class DummySettings:
@@ -27,6 +28,8 @@ class DummyServices:
     def __init__(self, run_path: str, user_config=None):
         self.run_path = run_path
         self.settings_config = DummySettings(user_config)
+        self.sqlite_store = None
+        self.video_parser = None
 
     def broadcast_pubsub(self, *_args, **_kwargs) -> None:
         return None
@@ -74,5 +77,34 @@ class ContentMonitorManagerTest(unittest.TestCase):
                 await asyncio.sleep(0)
                 await manager.stop_periodic_check()
                 self.assertIsNone(manager._periodic_task)
+
+        asyncio.run(run_case())
+
+    @unittest.skipIf(bool(MISSING_RUNTIME_DEPS), f"runtime dependencies missing: {MISSING_RUNTIME_DEPS}")
+    def test_sync_account_works_persists_parser_items_to_sqlite(self) -> None:
+        class FakeVideoParser:
+            async def fetch_all_douyin_user_posts(self, sec_user_id: str, max_pages: int = 20, count: int = 20):
+                return [
+                    DouyinContentItem(
+                        item_id="100000001",
+                        title=f"work-{sec_user_id}",
+                        share_url="https://www.douyin.com/video/100000001",
+                    )
+                ]
+
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                services = DummyServices(temp_dir)
+                services.sqlite_store = SQLiteStore(temp_dir)
+                services.video_parser = FakeVideoParser()
+                manager = DouyinContentMonitorManager(services)
+                account = await manager.add_account("https://www.douyin.com/user/MS4wLjABAAAA_test", "demo")
+
+                result = await manager.sync_account_works(account.account_id)
+
+                self.assertTrue(result["success"])
+                self.assertEqual(result["total"], 1)
+                stored = services.sqlite_store.load_monitor_accounts()
+                self.assertEqual(stored[0]["items"][0]["item_id"], "100000001")
 
         asyncio.run(run_case())

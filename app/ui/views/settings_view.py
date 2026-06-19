@@ -16,7 +16,7 @@ import httpx
 import flet as ft
 
 from ...core.media.file_naming import DEFAULT_FILENAME_TEMPLATE, format_media_filename
-from ...core.media.cookie_utils import cookie_looks_usable, sanitize_cookie_header
+from ...core.media.cookie_utils import cookie_looks_usable, parse_cookie_pool, sanitize_cookie_header
 from ...utils.logger import logger
 from ..base_page import PageBase
 from ..components.common.safe_icons import icon
@@ -50,6 +50,8 @@ class SettingsPage(PageBase):
         self.proxy_enabled_switch: ft.Switch | None = None
         self.proxy_address_field: ft.TextField | None = None
         self.monitor_interval_field: ft.TextField | None = None
+        self.settings_status_text: ft.Text | None = None
+        self.cookie_test_status_text: ft.Text | None = None
         self.account_notify_switches: dict[str, ft.Switch] = {}
         self.cookie_tester = None
         self.load_language()
@@ -138,12 +140,13 @@ class SettingsPage(PageBase):
         )
         cookies_config = getattr(settings, "cookies_config", {}) or {}
         self.douyin_cookie_field = ft.TextField(
-            label=self._.get("douyin_cookie", "抖音 Cookie"),
-            value=str(cookies_config.get("douyin_cookie") or ""),
+            label=self._.get("douyin_cookie", "抖音 Cookie（可每行一个）"),
+            value=self._format_cookie_pool_for_field(cookies_config, "douyin"),
+            hint_text="可填一个 Cookie；多个 Cookie 请每行一个，系统会轮换并对异常 Cookie 冷却。",
             password=True,
             multiline=True,
-            min_lines=3,
-            max_lines=5,
+            min_lines=4,
+            max_lines=8,
         )
         self.tiktok_cookie_field = ft.TextField(
             label=self._.get("tiktok_cookie", "TikTok Cookie"),
@@ -169,6 +172,8 @@ class SettingsPage(PageBase):
             width=220,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
+        self.settings_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.cookie_test_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.account_notify_switches = {}
         self.content_area.controls.clear()
         self.content_area.controls.extend(
@@ -272,6 +277,7 @@ class SettingsPage(PageBase):
                             spacing=8,
                             wrap=True,
                         ),
+                        self.cookie_test_status_text,
                         self.douyin_cookie_field,
                         self.tiktok_cookie_field,
                         ft.IconButton(
@@ -356,6 +362,7 @@ class SettingsPage(PageBase):
                             on_click=self.reset_filename_template,
                             icon_color=ft.Colors.PRIMARY,
                         ),
+                        self.settings_status_text,
                     ],
                     spacing=10,
                 ),
@@ -377,12 +384,13 @@ class SettingsPage(PageBase):
         )
         self.selected_download_path = str(user_config.get("douyin_content_download_path") or "").strip()
         self.douyin_cookie_field = ft.TextField(
-            label="抖音 Cookie",
-            value=str(cookies_config.get("douyin_cookie") or ""),
+            label="抖音 Cookie（可每行一个）",
+            value=self._format_cookie_pool_for_field(cookies_config, "douyin"),
+            hint_text="多个 Cookie 请每行一个。",
             password=True,
             multiline=True,
-            min_lines=3,
-            max_lines=5,
+            min_lines=4,
+            max_lines=8,
         )
         self.tiktok_cookie_field = ft.TextField(
             label="TikTok Cookie",
@@ -414,6 +422,8 @@ class SettingsPage(PageBase):
             value=str(user_config.get("douyin_content_monitor_interval_minutes", 10)),
             keyboard_type=ft.KeyboardType.NUMBER,
         )
+        self.settings_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.cookie_test_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.language_dropdown = None
         self.filename_template_field = None
         self.download_strategy_dropdown = None
@@ -457,6 +467,7 @@ class SettingsPage(PageBase):
                     [
                         ft.FilledButton("保存设置", icon=ft.Icons.SAVE, on_click=lambda e: self.run_async(self.save_settings())),
                         ft.OutlinedButton("重新加载完整设置页", icon=ft.Icons.REFRESH, on_click=lambda e: self.run_async(self.load())),
+                        self.settings_status_text,
                     ],
                     spacing=10,
                     wrap=True,
@@ -639,14 +650,26 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             return ""
 
     def _cookie_health_controls(self, cookies_config: dict[str, Any]) -> ft.Row:
+        douyin_pool = parse_cookie_pool(cookies_config.get("douyin_cookie_pool") or cookies_config.get("douyin_cookie") or "")
+        douyin_label = f"抖音 Cookie 池（{len(douyin_pool)} 个）" if len(douyin_pool) > 1 else "抖音 Cookie"
         return ft.Row(
             controls=[
-                self._cookie_chip("抖音 Cookie", str(cookies_config.get("douyin_cookie") or "")),
+                self._cookie_chip(douyin_label, douyin_pool[0] if douyin_pool else ""),
                 self._cookie_chip("TikTok Cookie", str(cookies_config.get("tiktok_cookie") or "")),
             ],
             wrap=True,
             spacing=8,
         )
+
+    def _format_cookie_pool_for_field(self, cookies_config: dict[str, Any], platform: str) -> str:
+        if platform != "douyin":
+            return str(cookies_config.get(f"{platform}_cookie") or "")
+        pool = parse_cookie_pool(cookies_config.get("douyin_cookie_pool") or [])
+        primary = str(cookies_config.get("douyin_cookie") or "")
+        for cookie in parse_cookie_pool(primary):
+            if cookie not in pool:
+                pool.insert(0, cookie)
+        return "\n".join(pool) if pool else primary
 
     def _cookie_chip(self, label: str, cookie: str) -> ft.Container:
         text = cookie.strip()
@@ -957,16 +980,64 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
                 except Exception:
                     pass
 
+    def _set_inline_status(self, target: str, message: str, color: Any | None = None) -> None:
+        control = self.cookie_test_status_text if target == "cookie" else self.settings_status_text
+        if control is None:
+            return
+        control.value = str(message or "")
+        control.color = color or ft.Colors.ON_SURFACE_VARIANT
+        try:
+            control.update()
+        except Exception as exc:
+            logger.debug(f"update settings inline status failed: {exc}")
+
+    async def _show_feedback(
+        self,
+        target: str,
+        message: str,
+        *,
+        success: bool = True,
+        duration: int = 3500,
+        show_close_icon: bool = True,
+    ) -> None:
+        color = ft.Colors.PRIMARY if success else ft.Colors.ERROR
+        self._set_inline_status(target, message, color)
+        try:
+            await self.app.snack_bar.show_snack_bar(
+                message,
+                bgcolor=color,
+                duration=duration,
+                show_close_icon=show_close_icon,
+            )
+        except Exception as exc:
+            logger.debug(f"settings feedback snackbar failed: {exc}")
+
     async def test_cookie(self, platform: str) -> None:
         field = self.douyin_cookie_field if platform == "douyin" else self.tiktok_cookie_field
-        cookie = sanitize_cookie_header((field.value if field else "") or "")
+        raw_cookie = (field.value if field else "") or ""
+        cookie_pool = parse_cookie_pool(raw_cookie) if platform == "douyin" else []
+        cookie = cookie_pool[0] if cookie_pool else sanitize_cookie_header(raw_cookie)
+        label = "抖音" if platform == "douyin" else "TikTok"
+        self._set_inline_status("cookie", f"正在测试 {label} Cookie...", ft.Colors.PRIMARY)
+        if not cookie:
+            await self._show_feedback("cookie", f"{label} Cookie 为空，请先粘贴后再测试", success=False)
+            return
+        if not self._looks_like_cookie(cookie):
+            await self._show_feedback("cookie", f"{label} Cookie 格式可能不完整：缺少有效键值或长度过短", success=False)
+            return
         tester = self.cookie_tester or self._default_cookie_test
-        result = tester(platform, cookie)
-        if inspect.isawaitable(result):
-            result = await result
-        success = bool(result.get("success")) if isinstance(result, dict) else bool(result)
-        reason = str(result.get("reason") if isinstance(result, dict) else ("Cookie 可用" if success else "Cookie 不可用"))
-        await self.app.snack_bar.show_snack_bar(reason, bgcolor=ft.Colors.PRIMARY if success else ft.Colors.ERROR)
+        try:
+            result = tester(platform, cookie)
+            if inspect.isawaitable(result):
+                result = await result
+            success = bool(result.get("success")) if isinstance(result, dict) else bool(result)
+            reason = str(result.get("reason") if isinstance(result, dict) else ("Cookie 可用" if success else "Cookie 不可用"))
+        except Exception as exc:
+            success = False
+            reason = f"{label} Cookie 检测异常：{exc}"
+        if platform == "douyin" and len(cookie_pool) > 1:
+            reason = f"{reason}；已识别 Cookie 池 {len(cookie_pool)} 个，当前测试第 1 个"
+        await self._show_feedback("cookie", reason, success=success, duration=5000)
 
     async def _default_cookie_test(self, platform: str, cookie: str) -> dict[str, Any]:
         if not cookie:
@@ -983,6 +1054,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             return {"success": False, "reason": f"{platform} Cookie 检测失败：{exc}"}
 
     async def save_settings(self) -> None:
+        self._set_inline_status("settings", "正在保存设置...", ft.Colors.PRIMARY)
         settings = self.app.services.settings_config
         user_config = dict(settings.user_config)
         language = (self.language_dropdown.value if self.language_dropdown else "") or user_config.get("language") or "Chinese"
@@ -1044,19 +1116,29 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         cookies_config = dict(getattr(settings, "cookies_config", {}) or {})
         raw_douyin_cookie = (self.douyin_cookie_field.value if self.douyin_cookie_field else "") or ""
         raw_tiktok_cookie = (self.tiktok_cookie_field.value if self.tiktok_cookie_field else "") or ""
-        douyin_cookie = sanitize_cookie_header(raw_douyin_cookie)
+        douyin_cookie_pool = parse_cookie_pool(raw_douyin_cookie)
+        douyin_cookie = douyin_cookie_pool[0] if douyin_cookie_pool else ""
         tiktok_cookie = sanitize_cookie_header(raw_tiktok_cookie)
-        cookie_cleaned = bool(raw_douyin_cookie.strip() != douyin_cookie or raw_tiktok_cookie.strip() != tiktok_cookie)
+        cookie_cleaned = bool(
+            raw_douyin_cookie.strip() != "\n".join(douyin_cookie_pool)
+            or raw_tiktok_cookie.strip() != tiktok_cookie
+        )
         cookies_config["douyin_cookie"] = douyin_cookie
+        cookies_config["douyin_cookie_pool"] = douyin_cookie_pool
         cookies_config["tiktok_cookie"] = tiktok_cookie
         settings.adopt_cookies_config(cookies_config)
         if hasattr(self.app.services.config_manager, "save_cookies_config"):
             await self.app.services.config_manager.save_cookies_config(cookies_config)
         if hasattr(self.app.services.video_parser, "parse_concurrency"):
             self.app.services.video_parser.parse_concurrency = parse_concurrency
+        cookie_sync_warnings: list[str] = []
         if hasattr(self.app.services.video_parser, "update_cookie"):
-            self.app.services.video_parser.update_cookie("douyin", douyin_cookie)
-            self.app.services.video_parser.update_cookie("tiktok", tiktok_cookie)
+            for platform, cookie_value in (("douyin", douyin_cookie), ("tiktok", tiktok_cookie)):
+                try:
+                    self.app.services.video_parser.update_cookie(platform, cookie_value)
+                except Exception as exc:
+                    cookie_sync_warnings.append(f"{platform}: {exc}")
+                    logger.debug(f"sync {platform} cookie to parser failed: {exc}")
         monitor = getattr(self.app.services, "douyin_content_monitor", None)
         if monitor is not None:
             changed = False
@@ -1075,14 +1157,16 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         message = self._.get("settings_saved", "设置已保存")
         if cookie_cleaned:
             message += "，已自动清理 Cookie 中无效片段"
-        await self.app.snack_bar.show_snack_bar(message, bgcolor=ft.Colors.PRIMARY)
+        if cookie_sync_warnings:
+            message += "；Cookie 已保存，但同步到内置解析器时有警告，重启应用后会重新加载"
+        await self._show_feedback("settings", message, success=True, duration=6000)
 
     async def _await_coro(self, coro: Any) -> None:
         try:
             await coro
         except Exception as exc:
             logger.exception(f"Settings UI task failed: {exc}")
-            await self.app.snack_bar.show_snack_bar(str(exc), bgcolor=ft.Colors.ERROR)
+            await self._show_feedback("settings", str(exc), success=False, duration=6000)
 
     def run_async(self, coro: Any) -> None:
         self.page.run_task(self._await_coro, coro)

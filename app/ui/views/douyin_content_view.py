@@ -15,12 +15,11 @@ from ...core.diagnostics.diagnostic_tools import export_diagnostic_bundle
 from ...core.content_monitor.douyin_content_monitor import DouyinMonitorAccount
 from ...utils.logger import logger
 from ..base_page import PageBase
+from ..components.business import douyin_content_cards as content_cards
 from ..components.business.image_preview_dialog import ImagePreviewDialog
 from ..components.business.video_player import VideoPlayer
 from ..components.common.safe_icons import icon
-from .douyin_content_account_card import build_account_card
 from .douyin_content_bulk_components import BatchImportControls, build_batch_import_dialog, build_work_bulk_action_rows
-from .douyin_content_item_cards import build_history_item_card, build_inbox_item_card, build_work_status_chip
 from .douyin_content_presenter import account_next_step, account_status_meta, auto_download_policy_label
 
 
@@ -50,6 +49,7 @@ class DouyinContentMonitorPage(PageBase):
         self.work_filter = "all"
         self.visible_work_count = 12
         self.work_page_size = 12
+        self.inbox_visible_count = 12
         self.download_in_progress = False
         self.download_stop_requested = False
         self.download_progress_text = ""
@@ -274,7 +274,6 @@ class DouyinContentMonitorPage(PageBase):
                         ft.IconButton(
                             icon=ft.Icons.LIST_ALT,
                             tooltip="查看最近批量结果",
-                            disabled=not self.batch_result_lines,
                             on_click=lambda e: self.run_async(self.show_batch_result_dialog()),
                             icon_color=ft.Colors.PRIMARY,
                         ),
@@ -427,6 +426,7 @@ class DouyinContentMonitorPage(PageBase):
                         ft.Text(title, theme_style=ft.TextThemeStyle.TITLE_MEDIUM, expand=True, overflow=ft.TextOverflow.ELLIPSIS),
                         ft.Text(f"{len(account.items) if account else 0} 个作品", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                         self.loading_indicator,
+                        self._batch_result_icon_button(),
                     ],
                     spacing=6,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -459,6 +459,7 @@ class DouyinContentMonitorPage(PageBase):
                         ft.Text("新作品收件箱", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, expand=True),
                         ft.Text(f"{len(items)} 个新作品", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                         self.loading_indicator,
+                        self._batch_result_icon_button(),
                     ],
                     spacing=6,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -492,6 +493,14 @@ class DouyinContentMonitorPage(PageBase):
             ],
             spacing=6,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+
+    def _batch_result_icon_button(self) -> ft.IconButton:
+        return ft.IconButton(
+            icon=ft.Icons.LIST_ALT,
+            tooltip="查看最近批量结果",
+            on_click=lambda e: self.run_async(self.show_batch_result_dialog()),
+            icon_color=ft.Colors.PRIMARY,
         )
 
     def _work_filter_buttons(self) -> list[ft.Control]:
@@ -709,19 +718,19 @@ class DouyinContentMonitorPage(PageBase):
                 )
             )
             return
-        for account, item in entries[: self.visible_work_count]:
+        for account, item in entries[: self.inbox_visible_count]:
             self.history_area.controls.append(self.create_inbox_item(account, item))
-        if self.visible_work_count < len(entries):
+        if self.inbox_visible_count < len(entries):
             self.history_area.controls.append(
                 ft.OutlinedButton(
-                    f"加载更多（{min(self.visible_work_count + self.work_page_size, len(entries))}/{len(entries)}）",
+                    f"加载更多（{min(self.inbox_visible_count + self.work_page_size, len(entries))}/{len(entries)}）",
                     icon=ft.Icons.EXPAND_MORE,
                     on_click=lambda e: self.run_async(self.load_more_works()),
                 )
             )
 
     def create_inbox_item(self, account: DouyinMonitorAccount, item):
-        return build_inbox_item_card(self, account, item)
+        return content_cards.create_inbox_item(self, account, item)
 
     def _filter_work_items(self, items: list[Any], mode: str) -> list[Any]:
         mode = str(mode or "all")
@@ -741,13 +750,13 @@ class DouyinContentMonitorPage(PageBase):
         return base
 
     def create_account_card(self, account: DouyinMonitorAccount):
-        return build_account_card(self, account)
+        return content_cards.create_account_card(self, account)
 
     def create_history_item(self, item):
-        return build_history_item_card(self, item)
+        return content_cards.create_history_item(self, item)
 
     def _work_status_chip(self, item) -> ft.Container:
-        return build_work_status_chip(self, item)
+        return content_cards.work_status_chip(self, item)
 
     @staticmethod
     def _is_gallery_item(item) -> bool:
@@ -842,10 +851,13 @@ class DouyinContentMonitorPage(PageBase):
             added = 0
             updated = 0
             failed = 0
+            hydrate_account_ids: list[str] = []
             for row in rows:
                 try:
                     before_ids = {account.account_id for account in self.manager.accounts}
                     account = await self.manager.add_account(row["url"], row["name"])
+                    if not row["name"]:
+                        hydrate_account_ids.append(account.account_id)
                     if account.account_id in before_ids:
                         updated += 1
                     else:
@@ -864,8 +876,11 @@ class DouyinContentMonitorPage(PageBase):
                     logger.debug(f"batch import account failed: {row.get('url')}, error={exc}")
             await close_dialog()
             await self.render_current_view()
+            if hydrate_account_ids:
+                self._schedule_batch_name_hydration(hydrate_account_ids)
+            suffix = f"，{len(hydrate_account_ids)} 个未填备注账号将在后台补全昵称" if hydrate_account_ids else ""
             await self.app.snack_bar.show_snack_bar(
-                f"批量导入完成：新增 {added}，更新 {updated}，失败 {failed}",
+                f"批量导入完成：新增 {added}，更新 {updated}，失败 {failed}{suffix}",
                 bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
                 duration=5000,
                 show_close_icon=True,
@@ -876,6 +891,40 @@ class DouyinContentMonitorPage(PageBase):
         dialog.open = True
         self.app.dialog_area.content = dialog
         self.app.dialog_area.update()
+
+    def _schedule_batch_name_hydration(self, account_ids: list[str]) -> None:
+        unique_ids = list(dict.fromkeys([account_id for account_id in account_ids if account_id]))
+        if not unique_ids:
+            return
+        try:
+            asyncio.create_task(self._hydrate_batch_account_names(unique_ids))
+        except RuntimeError:
+            self.run_async(self._hydrate_batch_account_names(unique_ids))
+
+    async def _hydrate_batch_account_names(self, account_ids: list[str]) -> None:
+        success = 0
+        failed = 0
+        for account_id in account_ids:
+            try:
+                result = await self.manager.hydrate_account_display_name(account_id, force=True)
+                if result.get("success"):
+                    success += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                failed += 1
+                logger.debug(f"batch import background hydrate nickname failed: account={account_id}, error={exc}")
+            await asyncio.sleep(0.8)
+        try:
+            await self.render_current_view()
+            await self.app.snack_bar.show_snack_bar(
+                f"批量昵称后台补全完成：成功 {success}，未获取 {failed}",
+                bgcolor=ft.Colors.PRIMARY if success else ft.Colors.ON_SURFACE_VARIANT,
+                duration=4000,
+                show_close_icon=True,
+            )
+        except Exception as exc:
+            logger.debug(f"batch import background hydrate UI refresh failed: {exc}")
 
     def _parse_batch_import_rows(self, text: str, default_group: str = "") -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
@@ -1065,7 +1114,7 @@ class DouyinContentMonitorPage(PageBase):
         if manual_name:
             return account, "已添加抖音监控用户"
 
-        result = await self.manager.hydrate_account_display_name(account.account_id)
+        result = await self.manager.hydrate_account_display_name(account.account_id, force=True)
         account = self.manager.find_account(account.account_id) or account
         display_name = account.display_name or account.douyin_nickname or "抖音用户"
         if result.get("success") and display_name != "抖音用户":
@@ -1235,7 +1284,7 @@ class DouyinContentMonitorPage(PageBase):
         self.view_mode = "inbox"
         self.work_select_mode = False
         self.selected_work_ids.clear()
-        self.visible_work_count = self.work_page_size
+        self.inbox_visible_count = self.work_page_size
         await self.render_current_view()
 
     async def back_to_accounts(self):
@@ -1311,7 +1360,7 @@ class DouyinContentMonitorPage(PageBase):
         if item is None:
             return
         if item.status == "new":
-            item.status = ""
+            item.status = "active"
         await self.manager.persist()
         await self.render_current_view()
 
@@ -1319,7 +1368,7 @@ class DouyinContentMonitorPage(PageBase):
         changed = 0
         for account, item in self._new_work_entries():
             if item.status == "new":
-                item.status = ""
+                item.status = "active"
                 changed += 1
         if changed:
             await self.manager.persist()
@@ -1375,8 +1424,12 @@ class DouyinContentMonitorPage(PageBase):
         return False
 
     async def load_more_works(self):
-        self.visible_work_count += self.work_page_size
-        await self.refresh_works()
+        if self.view_mode == "inbox":
+            self.inbox_visible_count += self.work_page_size
+            await self.refresh_new_work_inbox()
+        else:
+            self.visible_work_count += self.work_page_size
+            await self.refresh_works()
         if self.history_area:
             self.history_area.update()
 
@@ -1578,9 +1631,11 @@ class DouyinContentMonitorPage(PageBase):
         await self.app.snack_bar.show_snack_bar("已请求取消，当前账号处理完成后停止", bgcolor=ft.Colors.PRIMARY)
 
     async def show_batch_result_dialog(self):
-        if not self.batch_result_lines:
+        lines = self._latest_batch_result_lines()
+        if not lines:
             await self.app.snack_bar.show_snack_bar("暂无批量操作明细", bgcolor=ft.Colors.PRIMARY)
             return
+        self.batch_result_lines = lines[-200:]
 
         def close_dialog(_=None):
             dialog.open = False
@@ -1600,6 +1655,49 @@ class DouyinContentMonitorPage(PageBase):
         dialog.open = True
         self.app.dialog_area.content = dialog
         self.app.dialog_area.update()
+
+    def _latest_batch_result_lines(self) -> list[str]:
+        if self.batch_result_lines:
+            return list(self.batch_result_lines)
+        task_center = getattr(getattr(self.app, "services", None), "task_center", None)
+        snapshot = getattr(task_center, "snapshot", None)
+        if not callable(snapshot):
+            return []
+        try:
+            records = snapshot(limit=30)
+        except Exception as exc:
+            logger.debug(f"load latest batch task results failed: {exc}")
+            return []
+        lines: list[str] = []
+        for record in records:
+            if not isinstance(record, dict) or not self._is_batch_task_record(record):
+                continue
+            title = str(record.get("title") or "批量任务")
+            status = str(record.get("status") or "-")
+            detail = str(record.get("detail") or "").strip()
+            updated = str(record.get("finished_at") or record.get("updated_at") or record.get("started_at") or "")
+            completed = int(record.get("completed") or 0)
+            total = int(record.get("total") or 0)
+            success = int(record.get("success_count") or 0)
+            failed = int(record.get("failed_count") or 0)
+            progress = f"{completed}/{total}" if total else str(completed or "-")
+            suffix = f"，{detail}" if detail else ""
+            lines.append(f"[任务] {title}｜{status}｜进度 {progress}｜成功 {success}，失败 {failed}｜{updated}{suffix}")
+            if len(lines) >= 20:
+                break
+        return lines
+
+    @staticmethod
+    def _is_batch_task_record(record: dict[str, Any]) -> bool:
+        title = str(record.get("title") or "")
+        category = str(record.get("category") or "")
+        retry_action = str(record.get("retry_action") or "")
+        batch_markers = ("批量", "全部账号", "全部作品", "选中账号", "检测全部", "同步全部", "自动下载")
+        return (
+            any(marker in title for marker in batch_markers)
+            or any(marker in category for marker in ("作品监控", "内容监控", "自动下载"))
+            or retry_action in {"content_download_items", "content_sync_accounts", "content_check_accounts"}
+        )
 
     async def start_selected_accounts(self):
         if not self.selected_account_ids:

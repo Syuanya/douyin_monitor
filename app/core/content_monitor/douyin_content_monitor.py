@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import httpx
 
 from ...core.diagnostics.diagnostic_tools import sanitize_text, sanitize_url
-from ...core.media.cookie_utils import sanitize_cookie_header
+from ...core.media.cookie_utils import parse_cookie_pool, sanitize_cookie_header
 from ...core.media.file_naming import DEFAULT_FILENAME_TEMPLATE, format_media_filename
 from ...core.media.image_urls import deduplicate_image_urls
 from ...core.media.resumable_download import download_http_file
@@ -234,6 +234,8 @@ class DouyinContentMonitorManager:
         self._persist_lock = asyncio.Lock()
         self._last_persist_at = 0.0
         self._persist_debounce_seconds = 1.5
+        self._douyin_cookie_cursor = 0
+        self._douyin_cookie_cooldowns: dict[str, float] = {}
         self._op_logger = logger.bind(douyin_monitor_event=True)
         self._merge_service = ContentMergeService(
             now_fn=self._now,
@@ -481,40 +483,119 @@ class DouyinContentMonitorManager:
         self.services.broadcast_pubsub("douyin_monitor_update", {"event": "added", "account_id": account.account_id})
         return account
 
-    async def hydrate_account_display_name(self, account_id: str) -> dict[str, Any]:
+    async def hydrate_account_display_name(self, account_id: str, *, force: bool = False) -> dict[str, Any]:
         account = self.find_account(account_id)
         if not account:
             return {"success": False, "reason": "账号不存在", "display_name": ""}
-        if str(account.display_name or "").strip() and account.display_name != "抖音用户":
+        display_name = str(account.display_name or "").strip()
+        current_nickname = str(account.douyin_nickname or "").strip()
+        looks_manual_name = bool(display_name and display_name != "抖音用户" and display_name != current_nickname)
+        if not force and looks_manual_name:
             return {"success": True, "reason": "已使用手动备注", "display_name": account.display_name}
 
+        nickname = ""
+        avatar_url = ""
         try:
-            profile_info = await self.fetch_user_profile_info(account)
-        except Exception as exc:
-            profile_info = {}
-            logger.debug(f"Hydrate Douyin display name by user info failed: {exc}")
-
-        nickname = str(profile_info.get("douyin_nickname") or "").strip()
-        avatar_url = str(profile_info.get("avatar_url") or "").strip()
-        if not nickname:
-            try:
-                page_text, final_url = await self.fetch_public_profile(account)
-                if final_url:
-                    account.homepage_url = self.normalize_homepage_url(final_url)
+            page_text, final_url = await self.fetch_public_profile(account, include_cookie=False)
+            self._safe_update_homepage_from_final_url(account, final_url)
+            if self._public_profile_page_matches_account(account, page_text, final_url):
                 nickname = self._extract_douyin_nickname(page_text)
+            else:
+                logger.debug(
+                    "Skip Douyin nickname hydration because public profile page does not match target: "
+                    f"account={account.account_id}, final_url={sanitize_url(final_url)}"
+                )
+        except Exception as exc:
+            logger.debug(f"Hydrate Douyin display name by public profile failed: {exc}")
+
+        if nickname:
+            try:
+                profile_info = await self.fetch_user_profile_info(account)
+                if self._profile_info_matches_account(account, profile_info):
+                    avatar_url = str(profile_info.get("avatar_url") or "").strip()
             except Exception as exc:
-                logger.debug(f"Hydrate Douyin display name by public profile failed: {exc}")
+                logger.debug(f"Hydrate Douyin avatar by user info failed: {exc}")
 
         if nickname:
             account.douyin_nickname = nickname[:80]
-            account.display_name = account.douyin_nickname
+            if force or not display_name or display_name == "抖音用户" or display_name == current_nickname:
+                account.display_name = account.douyin_nickname
         if avatar_url:
             account.avatar_url = avatar_url
         if nickname or avatar_url:
             await self.persist(force=True)
             self.services.broadcast_pubsub("douyin_monitor_update", {"event": "account_profile", "account_id": account_id})
             return {"success": True, "reason": "已自动填充抖音昵称", "display_name": account.display_name}
+        if force and (not display_name or display_name == "抖音用户" or display_name == current_nickname):
+            changed = False
+            if current_nickname:
+                account.douyin_nickname = ""
+                changed = True
+            if account.display_name != "抖音用户":
+                account.display_name = "抖音用户"
+                changed = True
+            if changed:
+                await self.persist(force=True)
+                self.services.broadcast_pubsub("douyin_monitor_update", {"event": "account_profile", "account_id": account_id})
+            return {"success": False, "reason": "暂未获取到目标主页昵称，已避免使用 Cookie 账号昵称", "display_name": account.display_name}
         return {"success": False, "reason": "暂未获取到抖音昵称", "display_name": account.display_name}
+
+    def _profile_info_matches_account(self, account: DouyinMonitorAccount, profile_info: dict[str, Any]) -> bool:
+        """Return true only when API profile data clearly belongs to this monitored account.
+
+        Some Douyin user-info endpoints may return the logged-in Cookie owner
+        under risk-control or parameter issues.  Auto-naming must never use that
+        ambiguous data for a newly added monitor target.
+        """
+
+        if not isinstance(profile_info, dict) or not profile_info:
+            return False
+        target_sec_uid = self.extract_sec_uid(account.homepage_url)
+        if not target_sec_uid:
+            return False
+        for key in ("sec_uid", "secUid", "sec_user_id", "secUserId"):
+            value = str(profile_info.get(key) or "").strip()
+            if value and value == target_sec_uid:
+                return True
+        return False
+
+    def _safe_update_homepage_from_final_url(self, account: DouyinMonitorAccount, final_url: str) -> bool:
+        """Update homepage only when a redirect still points to this target user.
+
+        Cookie-authenticated Douyin requests can occasionally land on the logged-in
+        user or another interstitial page.  A monitor target must never be
+        re-pointed to that page, otherwise later auto-naming can inherit the
+        Cookie owner's identity.
+        """
+
+        if not final_url:
+            return False
+        try:
+            normalized = self.normalize_homepage_url(final_url)
+        except Exception:
+            return False
+        current_sec_uid = self.extract_sec_uid(account.homepage_url)
+        final_sec_uid = self.extract_sec_uid(normalized)
+        if current_sec_uid:
+            if final_sec_uid and final_sec_uid == current_sec_uid:
+                account.homepage_url = normalized
+                return True
+            return False
+        if final_sec_uid:
+            account.homepage_url = normalized
+            return True
+        return False
+
+    def _public_profile_page_matches_account(self, account: DouyinMonitorAccount, page_text: str, final_url: str = "") -> bool:
+        """Return true only when fetched profile HTML can be tied to the target."""
+
+        target_sec_uid = self.extract_sec_uid(account.homepage_url)
+        if not target_sec_uid:
+            return True
+        final_sec_uid = self.extract_sec_uid(final_url)
+        if final_sec_uid:
+            return final_sec_uid == target_sec_uid
+        return target_sec_uid in str(page_text or "")
 
     @staticmethod
     def _auto_fill_display_name(account: DouyinMonitorAccount) -> None:
@@ -798,7 +879,7 @@ class DouyinContentMonitorManager:
             safe_name = f"{safe_name}_{suffix}"
         return safe_name[:120]
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, include_cookie: bool = True) -> dict[str, str]:
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -810,14 +891,80 @@ class DouyinContentMonitorManager:
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
         }
-        try:
-            cookie = self.settings.get_cookies_value("douyin_cookie", "")
-        except Exception:
-            cookie = ""
-        cookie = sanitize_cookie_header(cookie)
+        if include_cookie:
+            cookie = self._select_douyin_cookie()
+            if cookie:
+                headers["Cookie"] = cookie
+        return headers
+
+    def _headers_for_cookie_request(self, *, include_cookie: bool = True) -> tuple[dict[str, str], str]:
+        headers = self._headers(include_cookie=False)
+        cookie = self._select_douyin_cookie() if include_cookie else ""
         if cookie:
             headers["Cookie"] = cookie
-        return headers
+        return headers, cookie
+
+    def _douyin_cookie_pool(self) -> list[str]:
+        try:
+            cookies_config = getattr(self.settings, "cookies_config", {}) or {}
+            configured_pool = cookies_config.get("douyin_cookie_pool") or []
+            primary_cookie = cookies_config.get("douyin_cookie") or self.settings.get_cookies_value("douyin_cookie", "")
+        except Exception:
+            configured_pool = []
+            primary_cookie = ""
+        pool = parse_cookie_pool(configured_pool)
+        for cookie in parse_cookie_pool(primary_cookie):
+            if cookie not in pool:
+                pool.append(cookie)
+        return pool
+
+    def _select_douyin_cookie(self) -> str:
+        pool = self._douyin_cookie_pool()
+        if not pool:
+            return ""
+        now = time.monotonic()
+        self._douyin_cookie_cooldowns = {
+            cookie: until for cookie, until in self._douyin_cookie_cooldowns.items() if until > now
+        }
+        available = [cookie for cookie in pool if self._douyin_cookie_cooldowns.get(cookie, 0.0) <= now]
+        if not available:
+            return ""
+        index = self._douyin_cookie_cursor % len(available)
+        self._douyin_cookie_cursor = (self._douyin_cookie_cursor + 1) % max(1, len(available))
+        return available[index]
+
+    def _cooldown_douyin_cookie(self, cookie: str, reason: str = "") -> None:
+        if not cookie:
+            return
+        try:
+            seconds = float(self.settings.user_config.get("douyin_cookie_cooldown_seconds", 600) or 600)
+        except (TypeError, ValueError):
+            seconds = 600.0
+        seconds = max(60.0, min(3600.0, seconds))
+        self._douyin_cookie_cooldowns[cookie] = time.monotonic() + seconds
+        logger.debug(f"Douyin Cookie temporarily cooled down for {int(seconds)}s: {sanitize_text(reason)[:120]}")
+
+    def _record_cookie_response_health(self, cookie: str, response: httpx.Response | None = None, error: Exception | None = None) -> None:
+        if not cookie:
+            return
+        reason = ""
+        if response is not None:
+            status_code = int(getattr(response, "status_code", 0) or 0)
+            if status_code in {401, 403, 418, 429} or status_code >= 500:
+                reason = f"HTTP {status_code}"
+            else:
+                try:
+                    text = response.text[:4000]
+                except Exception:
+                    text = ""
+                lowered = text.lower()
+                risk_markers = ("captcha", "verify", "security", "risk", "login", "风控", "验证", "登录")
+                if any(marker in lowered for marker in risk_markers):
+                    reason = "risk-control marker in response"
+        if error is not None and not reason:
+            reason = str(error)
+        if reason:
+            self._cooldown_douyin_cookie(cookie, reason)
 
     @staticmethod
     def _extract_display_name(page_text: str) -> str:
@@ -1034,19 +1181,57 @@ class DouyinContentMonitorManager:
 
     async def fetch_parser_user_posts(self, account: DouyinMonitorAccount) -> list[DouyinContentItem]:
         sec_uid = self.extract_sec_uid(account.homepage_url)
+        fallback_items: list[DouyinContentItem] = []
         if not sec_uid:
-            return []
-        await self._resolve_parser_backend()
+            try:
+                page_text, final_url = await self.fetch_public_profile(account, include_cookie=False)
+                self._safe_update_homepage_from_final_url(account, final_url)
+                if self._public_profile_page_matches_account(account, page_text, final_url):
+                    fallback_items = self.parse_public_profile_items(page_text)
+            except Exception as exc:
+                logger.debug(f"Resolve Douyin profile URL before parser sync failed: {exc}")
+            sec_uid = self.extract_sec_uid(account.homepage_url)
+            if not sec_uid:
+                return fallback_items
         backend = build_douyin_parser_backend(
             self._parser_backend(),
             video_parser=getattr(self.services, "video_parser", None),
             external_base_url=self._external_api_base_url(),
         )
-        return self._strip_eager_video_download_urls(await backend.fetch_profile_contents(sec_uid, max_pages=self._parser_max_pages(), count=20))
+        try:
+            items = await backend.fetch_profile_contents(sec_uid, max_pages=self._parser_max_pages(), count=20)
+        except Exception:
+            if fallback_items:
+                return self._strip_eager_video_download_urls(fallback_items)
+            raise
+        normalized_items = self._normalize_parser_items(items)
+        if normalized_items:
+            return self._strip_eager_video_download_urls(normalized_items)
+        return self._strip_eager_video_download_urls(fallback_items)
 
     async def fetch_external_user_posts(self, account: DouyinMonitorAccount) -> list[DouyinContentItem]:
         """Compatibility alias. The current default backend is the bundled parser."""
         return await self.fetch_parser_user_posts(account)
+
+    def _normalize_parser_items(self, items: list[Any]) -> list[DouyinContentItem]:
+        normalized: list[DouyinContentItem] = []
+        seen: set[str] = set()
+        now = self._now()
+        for raw in items or []:
+            item: DouyinContentItem | None
+            if isinstance(raw, DouyinContentItem):
+                item = raw
+            elif isinstance(raw, dict):
+                item = DouyinContentItem.from_dict(raw)
+                if not item.item_id:
+                    item = self._item_from_json_object(raw, now)
+            else:
+                item = None
+            if not item or not item.item_id or item.item_id in seen:
+                continue
+            seen.add(item.item_id)
+            normalized.append(item)
+        return normalized
 
     @staticmethod
     def _strip_eager_video_download_urls(items: list[DouyinContentItem]) -> list[DouyinContentItem]:
@@ -1064,14 +1249,36 @@ class DouyinContentMonitorManager:
             return {"success": False, "reason": "该账号已有检测或同步任务正在运行", "total": len(account.items), "new": 0}
         async with lock:
             try:
+                await self.hydrate_account_display_name(account.account_id)
+            except Exception as exc:
+                logger.debug(f"Refresh target identity before sync failed: {exc}")
+            parser_error = ""
+            try:
                 items = await self.fetch_parser_user_posts(account)
             except Exception as exc:
-                return {"success": False, "reason": f"解析器获取作品失败：{exc}", "total": 0, "new": 0}
+                parser_error = str(exc)
+                logger.debug(f"Douyin parser sync failed, trying public profile fallback: {exc}")
+                items = []
+            if not items:
+                try:
+                    page_text, final_url = await self.fetch_public_profile(account)
+                    if self._public_profile_page_matches_account(account, page_text, final_url):
+                        self._safe_update_homepage_from_final_url(account, final_url)
+                        items = self.parse_public_profile_items(page_text)
+                    else:
+                        logger.debug(
+                            "Skip sync public-profile fallback because fetched page does not match target: "
+                            f"account={account.account_id}, final_url={sanitize_url(final_url)}"
+                        )
+                except Exception as exc:
+                    if parser_error:
+                        return {"success": False, "reason": f"解析器获取作品失败：{parser_error}；公开主页回退失败：{exc}", "total": 0, "new": 0}
+                    logger.debug(f"Douyin public profile fallback during sync failed: {exc}")
             if not items:
                 return {
                     "success": False,
                     "reason": (
-                        "解析器未返回作品列表。请检查抖音 Cookie、X-Bogus/A_Bogus 签名能力，"
+                        "未返回作品列表。请检查抖音 Cookie、X-Bogus/A_Bogus 签名能力，"
                         "以及该博主主页是否有公开作品。"
                     ),
                     "total": 0,
@@ -1104,18 +1311,24 @@ class DouyinContentMonitorManager:
             item.image_urls = deduplicate_image_urls(item.image_urls)
         return self._merge_service.merge_detected_items(account, detected_items)
 
-    async def fetch_public_profile(self, account: DouyinMonitorAccount) -> tuple[str, str]:
+    async def fetch_public_profile(self, account: DouyinMonitorAccount, *, include_cookie: bool = True) -> tuple[str, str]:
         proxy = None
         if self.settings.user_config.get("enable_proxy"):
             proxy = self.settings.user_config.get("proxy_address") or None
+        headers, cookie = self._headers_for_cookie_request(include_cookie=include_cookie)
         async with httpx.AsyncClient(
-            headers=self._headers(),
+            headers=headers,
             follow_redirects=True,
             timeout=self._request_timeout(),
             proxy=proxy,
         ) as client:
-            response = await client.get(account.homepage_url)
-            response.raise_for_status()
+            try:
+                response = await client.get(account.homepage_url)
+                self._record_cookie_response_health(cookie, response=response)
+                response.raise_for_status()
+            except Exception as exc:
+                self._record_cookie_response_health(cookie, error=exc)
+                raise
             return response.text, str(response.url)
 
     async def fetch_user_profile_info(self, account: DouyinMonitorAccount) -> dict[str, str]:
@@ -1127,14 +1340,20 @@ class DouyinContentMonitorManager:
         if self.settings.user_config.get("enable_proxy"):
             proxy = self.settings.user_config.get("proxy_address") or None
         url = f"https://www.douyin.com/web/api/v2/user/info/?sec_uid={sec_uid}"
+        headers, cookie = self._headers_for_cookie_request(include_cookie=True)
         async with httpx.AsyncClient(
-            headers=self._headers(),
+            headers=headers,
             follow_redirects=True,
             timeout=self._request_timeout(),
             proxy=proxy,
         ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+            try:
+                response = await client.get(url)
+                self._record_cookie_response_health(cookie, response=response)
+                response.raise_for_status()
+            except Exception as exc:
+                self._record_cookie_response_health(cookie, error=exc)
+                raise
             data = response.json()
 
         if int(data.get("status_code") or 0) != 0:
@@ -1150,6 +1369,9 @@ class DouyinContentMonitorManager:
             "douyin_nickname": nickname[:80],
             "avatar_url": avatar_url,
             "aweme_count": aweme_count,
+            "sec_uid": str(user_info.get("sec_uid") or user_info.get("secUid") or user_info.get("sec_user_id") or ""),
+            "uid": str(user_info.get("uid") or ""),
+            "unique_id": str(user_info.get("unique_id") or ""),
         }
 
     @staticmethod
@@ -1194,26 +1416,23 @@ class DouyinContentMonitorManager:
             self.services.broadcast_pubsub("douyin_monitor_update", {"event": "checking", "account_id": account_id})
             try:
                 page_text, final_url = await self.fetch_public_profile(account)
-                if final_url:
-                    try:
-                        account.homepage_url = self.normalize_homepage_url(final_url)
-                    except Exception:
-                        pass
-                douyin_nickname = self._extract_douyin_nickname(page_text)
-                if douyin_nickname:
-                    account.douyin_nickname = douyin_nickname
-                    self._auto_fill_display_name(account)
+                profile_page_matches = self._public_profile_page_matches_account(account, page_text, final_url)
+                if profile_page_matches:
+                    self._safe_update_homepage_from_final_url(account, final_url)
+                identity_result = await self.hydrate_account_display_name(account.account_id)
+                douyin_nickname = account.douyin_nickname if identity_result.get("success") else ""
                 try:
                     profile_info = await self.fetch_user_profile_info(account)
                 except Exception as exc:
                     profile_info = {}
                     logger.debug(f"Douyin user profile info fallback failed: {exc}")
-                if profile_info.get("douyin_nickname"):
+                profile_info_matches = self._profile_info_matches_account(account, profile_info)
+                if profile_info_matches and profile_info.get("douyin_nickname") and not douyin_nickname:
                     account.douyin_nickname = profile_info["douyin_nickname"]
                     self._auto_fill_display_name(account)
-                if profile_info.get("avatar_url"):
+                if profile_info_matches and profile_info.get("avatar_url"):
                     account.avatar_url = profile_info["avatar_url"]
-                profile_aweme_count = self._parse_int(profile_info.get("aweme_count"), -1)
+                profile_aweme_count = self._parse_int(profile_info.get("aweme_count"), -1) if profile_info_matches else -1
                 detected_items = []
                 if getattr(account, "auto_sync_enabled", True):
                     try:
@@ -1221,7 +1440,7 @@ class DouyinContentMonitorManager:
                     except Exception as exc:
                         logger.debug(f"Douyin parser user posts fallback failed: {exc}")
                 if not detected_items:
-                    detected_items = self.parse_public_profile_items(page_text)
+                    detected_items = self.parse_public_profile_items(page_text) if profile_page_matches else []
                 if not detected_items:
                     if profile_aweme_count >= 0:
                         return await self._handle_profile_count_check(account, profile_aweme_count, notify=notify)

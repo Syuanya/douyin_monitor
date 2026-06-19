@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .backend import ParserCapabilities, ParserHealth
+from .backend import ParserCapability, ParserCapabilities, ParserHealth
 from .registry import ParserBackendDescriptor, parser_backend_registry
 
 
@@ -16,8 +16,8 @@ class InternalDouyinParserBackend:
 
     async def health_check(self) -> ParserHealth:
         if self.video_parser is None:
-            return ParserHealth(False, self.name, "内置解析器未初始化")
-        return ParserHealth(True, self.name, "内置解析器可用")
+            return ParserHealth(False, self.name, "内置解析器未初始化", self.capabilities(), self.version)
+        return ParserHealth(True, self.name, "内置解析器可用", self.capabilities(), self.version)
 
     def capabilities(self) -> ParserCapabilities:
         return ParserCapabilities(parse_url=True, profile_contents=True, video=True, gallery=True, tiktok=True)
@@ -45,8 +45,8 @@ class ExternalDouyinParserBackend:
 
     async def health_check(self) -> ParserHealth:
         if not self.base_url:
-            return ParserHealth(False, self.name, "外部解析器地址未配置")
-        return ParserHealth(True, self.name, f"外部解析器已配置：{self.base_url}")
+            return ParserHealth(False, self.name, "外部解析器地址未配置", self.capabilities(), self.version)
+        return ParserHealth(True, self.name, f"外部解析器已配置：{self.base_url}", self.capabilities(), self.version)
 
     def capabilities(self) -> ParserCapabilities:
         return ParserCapabilities(parse_url=False, profile_contents=True, video=True, gallery=True, tiktok=False)
@@ -86,12 +86,13 @@ class FallbackDouyinParserBackend:
             any_ok = any_ok or health.ok
             state = "ok" if health.ok else "bad"
             details.append(f"{backend.name}:{state}({health.detail})")
-        return ParserHealth(any_ok, self.name, "；".join(details))
+        return ParserHealth(any_ok, self.name, "；".join(details), self.capabilities(), self.version)
 
     def capabilities(self) -> ParserCapabilities:
         merged = ParserCapabilities()
         for backend in self._backends():
             merged = merged.merge(backend.capabilities())
+        merged.fallback = True
         return merged
 
     async def parse_url(self, url: str) -> dict[str, Any]:
@@ -122,6 +123,38 @@ class FallbackDouyinParserBackend:
             except Exception as exc:
                 errors.append(f"{backend.name}: {exc}")
         raise RuntimeError("所有解析器后端均不可用：" + "；".join(errors))
+
+
+class SingleUrlParserBackend:
+    """Compatibility backend for single work URL parsing only."""
+
+    name = "single_url"
+    platform = "douyin"
+    version = "single-url-v1"
+
+    def __init__(self, video_parser: Any):
+        self.video_parser = video_parser
+        self.capabilities = ParserCapability(single_url=True, video=True, gallery=True, tiktok=True, fallback=True)
+
+    async def health_check(self) -> ParserHealth:
+        if self.video_parser is None:
+            return ParserHealth(False, self.name, "单链接解析器未初始化", self.capabilities, self.version)
+        return ParserHealth(True, self.name, "单链接解析器可用", self.capabilities, self.version)
+
+    async def parse_url(self, url: str) -> dict[str, Any]:
+        health = await self.health_check()
+        if not health.ok:
+            raise RuntimeError(health.detail)
+        if hasattr(self.video_parser, "parse_url_direct"):
+            return await self.video_parser.parse_url_direct(url)
+        return await self.video_parser.parse_url(url)
+
+    async def fetch_profile_contents(self, sec_user_id: str, max_pages: int = 20, count: int = 20) -> list[Any]:
+        raise NotImplementedError("单链接解析器不支持主页作品同步")
+
+
+def build_single_url_parser_backend(*, video_parser: Any = None) -> SingleUrlParserBackend:
+    return SingleUrlParserBackend(video_parser)
 
 
 def build_douyin_parser_backend(kind: str, *, video_parser: Any = None, external_base_url: str = ""):

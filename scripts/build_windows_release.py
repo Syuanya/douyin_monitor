@@ -11,6 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SPEC_PATH = ROOT / "packaging" / "windows" / "douyin_monitor.spec"
 ISS_PATH = ROOT / "packaging" / "windows" / "installer.iss"
+RUNTIME_CONFIG_FILES = {
+    "cookies.json",
+    "cookies.secure.json",
+    "douyin_content_monitor.json",
+    "parse_history.json",
+    "task_center.json",
+}
+RUNTIME_DIRS = {"data", "logs", "downloads", "diagnostics", "__pycache__"}
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -45,7 +53,24 @@ def build_portable(clean: bool) -> Path:
     out_dir = ROOT / "dist" / "DouyinMonitor"
     if not out_dir.exists():
         raise SystemExit(f"PyInstaller output missing: {out_dir}")
+    remove_runtime_data(out_dir)
     return out_dir
+
+
+def remove_runtime_data(out_dir: Path) -> None:
+    """Remove local runtime/private data from the portable release folder."""
+
+    for relative_dir in RUNTIME_DIRS:
+        target = out_dir / relative_dir
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+    config_dir = out_dir / "config"
+    for filename in RUNTIME_CONFIG_FILES:
+        target = config_dir / filename
+        try:
+            target.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def build_installer() -> None:

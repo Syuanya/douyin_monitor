@@ -159,7 +159,14 @@ class DownloadRecoveryService:
         if store is None:
             return
         try:
-            store.save_download_record(asdict(record), max_records=self.max_records)
+            payload = asdict(record)
+            saver = getattr(store, "save_download_record", None)
+            if callable(saver):
+                saver(payload, max_records=self.max_records)
+                return
+            upsert = getattr(store, "upsert_download_record", None)
+            if callable(upsert):
+                upsert(payload)
         except Exception:
             return
 

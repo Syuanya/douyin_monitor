@@ -296,8 +296,8 @@ def main() -> int:
         errors.append("settings download strategy must not pass on_change to Dropdown; current Flet build rejects it")
     if "应用策略" not in settings_text:
         errors.append("settings download strategy apply button missing")
-    if "sanitize_cookie_header(raw_douyin_cookie)" not in settings_text:
-        errors.append("settings page should sanitize Cookie before saving")
+    if "parse_cookie_pool(raw_douyin_cookie)" not in settings_text:
+        errors.append("settings page should parse and sanitize Douyin Cookie pool before saving")
 
     diagnostic_text = (ROOT / "app/ui/views/diagnostic_health_view.py").read_text(encoding="utf-8")
     for marker in ("check_python_runtime", "check_disk_space", "check_download_strategy", "_safe_int_config", "sanitize_cookie_header", "shutil.disk_usage"):
