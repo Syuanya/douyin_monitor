@@ -14,15 +14,36 @@ from ....utils.logger import logger
 
 
 class VideoPlayer:
+    DEFAULT_TEXTS = {
+        "close": "关闭",
+        "screenshot": "截图",
+        "screenshot_success": "截图已保存",
+        "screenshot_failed": "截图失败 ⚠️",
+        "browser_play": "浏览器播放",
+        "open_live_room_page": "打开播放页",
+        "copy_video_url": "复制视频地址",
+        "copy_success": "已复制",
+        "copy_failed": "复制失败",
+        "open_failed": "打开失败",
+        "unsupported_file_type": "未找到视频文件 ⚠️",
+        "unsupported_play_on_web": "当前文件不支持网页播放",
+        "previewing": "正在预览",
+        "view_stream_source_now": "正在访问视频源",
+    }
+
     def __init__(self, app):
         self.app = app
-        self._ = {}
+        self._ = dict(self.DEFAULT_TEXTS)
         self.load_language()
 
     def load_language(self):
-        language = self.app.language_manager.language
+        language = getattr(getattr(self.app, "language_manager", None), "language", {}) or {}
+        merged = dict(self.DEFAULT_TEXTS)
         for key in ("video_player", "storage_page", "base"):
-            self._.update(language.get(key, {}))
+            section = language.get(key, {})
+            if isinstance(section, dict):
+                merged.update(section)
+        self._ = merged
 
     async def _maybe_await(self, value):
         if inspect.isawaitable(value):

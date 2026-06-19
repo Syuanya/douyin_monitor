@@ -85,8 +85,8 @@ class UserPost(BaseModel):
     tz_name: str = "America%2FLos_Angeles"
     user_is_login: str = "true"
     webcast_language: str = "zh-Hans"
-    msToken: str = "SXtP7K0MMFlQmzpuWfZoxAlAaKqt-2p8oAbOHFBw-k3TA2g4jE_FXrFKf3i38lR-xNh_bV1_qfTPRnj4PXbkBfrVD2iAazeUkASIASHT0pu-Bx2_POx7O3nBBHZe2SI7CPsanerdclxHht1hcoUTlg%3D%3D"
-    _signature: str = "_02B4Z6wo000017oyWOQAAIDD9xNhTSnfaDu6MFxAAIlj23"
+    msToken: str = TokenManager.gen_real_msToken()
+    _signature: str = ""
 
 
 class UserLike(BaseRequestModel):

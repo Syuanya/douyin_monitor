@@ -11,6 +11,7 @@ __pycache__/
 /build/
 /dist/
 *.spec
+!packaging/windows/*.spec
 
 # Tool caches
 .pytest_cache/

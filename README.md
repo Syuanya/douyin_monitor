@@ -1,18 +1,42 @@
 # douyin_monitor
 
-一个本地运行的抖音内容监控与视频解析工具，支持监控公开主页作品更新、解析抖音/TikTok 链接、下载视频/图集、查看任务记录，并提供 Windows 本地运行与 exe 打包脚本。
+一个本地运行的 Douyin/TikTok 内容监控与无水印解析下载工具。项目基于 Python + Flet 构建桌面界面，支持抖音公开主页作品监控、批量同步作品、视频/图集解析、下载队列、任务中心、下载历史、问题诊断和 Windows exe 打包。
 
-> 本项目仅用于用户主动提供的公开链接或有权访问的内容。请自行确认使用场景符合平台规则、法律法规和内容授权边界。
+> 本项目仅用于用户主动提供的公开链接或有权访问的内容。请自行确认使用场景符合平台规则、法律法规和内容授权边界。Cookie、账号、下载记录、解析历史等运行数据只应保存在本地，不应提交到 GitHub。
 
-## 功能特性
+## 界面预览
 
-- 抖音公开主页内容监控：支持添加账号、同步作品、检测更新。
-- 视频/图集解析：内置 Douyin/TikTok parser，无需单独启动外部 API 服务。
-- 下载任务管理：支持任务中心、进度记录、失败重试提示、下载恢复。
-- 本地数据存储：使用 SQLite 保存运行数据，并保留 JSON 兼容镜像。
-- Cookie 配置：可在设置页填写 Cookie，提高解析和监控稳定性。
-- 桌面应用：基于 Flet，适合 Windows 本地运行。
-- Windows 打包：提供一键生成 exe 的 `build_exe_windows.bat`。
+### 首页仪表盘
+
+![首页仪表盘](docs/images/01-home-dashboard.png)
+
+### 抖音内容监控
+
+![抖音内容监控](docs/images/02-content-monitor.png)
+
+### 作品同步与下载
+
+![作品同步与下载](docs/images/03-work-gallery.png)
+
+### TikTok/抖音无水印解析
+
+![TikTok/抖音无水印解析](docs/images/04-video-parser.png)
+
+### 媒体预览
+
+![媒体预览](docs/images/05-media-preview.png)
+
+## 核心功能
+
+- 抖音主页监控：添加公开主页链接后，定时检测作品更新并维护作品基线。
+- 批量账号管理：支持监控中、未监控、有新作品、异常等状态筛选。
+- 作品同步：按账号同步作品资料，支持视频、图集、新作品、未下载、已下载、失败等分类查看。
+- 无水印解析：支持粘贴 Douyin/TikTok 分享口令或网址进行解析。
+- 下载管理：提供下载队列、任务中心、下载历史、失败原因提示和重试入口。
+- Cookie 池：可在设置页本地配置一个或多个 Douyin Cookie，用于轮换、冷却和提升稳定性。
+- 本地存储：使用 SQLite/JSON 保存本地运行状态，便于备份、迁移和清理。
+- 诊断工具：内置环境检查、磁盘空间检查、运行状态检查和常见问题提示。
+- Windows 打包：提供脚本生成可独立运行的 Windows exe。
 
 ## 项目结构
 
@@ -21,7 +45,7 @@ douyin_monitor/
 ├─ app/                         # 桌面应用、业务逻辑、UI 页面
 ├─ crawlers/                    # 内置 Douyin/TikTok 解析器
 ├─ config/                      # 默认配置与语言配置
-├─ docs/                        # 隐私、风险与补充文档
+├─ docs/                        # 文档与 README 截图
 ├─ locales/                     # 中英文界面文案
 ├─ packaging/windows/           # PyInstaller / Inno Setup 打包配置
 ├─ scripts/                     # 检查、迁移、维护、测试、发布脚本
@@ -34,11 +58,11 @@ douyin_monitor/
 
 ## 环境要求
 
-- Windows 10/11 推荐。
-- Python 3.10 - 3.12。
-- 建议使用虚拟环境运行。
+- Windows 10/11 推荐
+- Python 3.10 - 3.12
+- 建议使用虚拟环境运行
 
-Python 安装时请勾选 “Add Python to PATH”。
+Python 安装时建议勾选 `Add Python to PATH`。
 
 ## Windows 快速运行
 
@@ -60,74 +84,39 @@ run_windows.bat
 run_windows_checked.bat
 ```
 
-## 手动运行方式
+## 手动运行
 
 ```bash
 python -m venv .venv
+```
+
+Windows：
+
+```bat
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-Linux/macOS 可把激活虚拟环境命令换成：
+Linux/macOS：
 
 ```bash
 source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python main.py
 ```
 
-## 配置 Cookie
+## Cookie 与本地数据
 
-应用可以不配置 Cookie 启动，但解析和监控稳定性会受平台风控影响。推荐在桌面应用的“设置”页填写：
+应用可以不配置 Cookie 启动，但解析和监控稳定性可能受平台风控影响。推荐只在桌面应用的“设置”页本地填写：
 
 - 抖音 Cookie
-- TikTok Cookie（如需解析 TikTok）
+- TikTok Cookie
+- 多个抖音 Cookie 可按行填写，系统会做基础清洗、轮换和异常冷却
 
-Cookie、账号列表、监控记录、解析历史、任务记录、日志、数据库等都属于本地运行数据，不应该提交到 GitHub。
-
-## 生成 Windows exe
-
-在 Windows 上双击或执行：
-
-```bat
-build_exe_windows.bat
-```
-
-脚本会自动完成：
-
-1. 创建 `.venv` 虚拟环境。
-2. 安装 `requirements.txt` 依赖。
-3. 安装 PyInstaller。
-4. 检查运行环境。
-5. 使用 `packaging/windows/douyin_monitor.spec` 生成 exe。
-
-生成结果：
-
-```text
-dist\DouyinMonitor\DouyinMonitor.exe
-```
-
-如果你想在 CI 或命令行里执行并跳过最后的 `pause`：
-
-```bat
-build_exe_windows.bat --no-pause
-```
-
-也可以使用更严格的发布流程：
-
-```bat
-build_windows_release.bat --skip-tests
-```
-
-如需生成安装包，需要先安装 Inno Setup，并确保 `ISCC.exe` 在 PATH 中：
-
-```bat
-build_windows_release.bat --installer --skip-tests
-```
-
-## 本地数据说明
-
-运行后可能生成这些目录或文件：
+以下内容属于本地运行数据，不要提交到 GitHub：
 
 - `config/accounts.json`
 - `config/cookies.json`
@@ -141,8 +130,12 @@ build_windows_release.bat --installer --skip-tests
 - `cache/`
 - `downloads/`
 - `diagnostics/`
+- `.env`
+- `.venv/`
+- `build/`
+- `dist/`
 
-这些文件已在 `.gitignore` 中排除。上传 GitHub 前请确认不要手动添加它们。
+这些路径已写入 `.gitignore`。如果不小心生成过本地数据，上传前请重新检查 `git status`。
 
 ## 清理本地运行数据
 
@@ -172,9 +165,41 @@ python scripts/clear_local_data.py --yes --include-logs
 
 下载目录默认不会被脚本删除，避免误删用户媒体文件。
 
+## 生成 Windows exe
+
+在 Windows 上执行：
+
+```bat
+build_exe_windows.bat
+```
+
+生成结果：
+
+```text
+dist\DouyinMonitor\DouyinMonitor.exe
+```
+
+如果需要跳过脚本末尾的暂停：
+
+```bat
+build_exe_windows.bat --no-pause
+```
+
+更严格的发布流程：
+
+```bat
+build_windows_release.bat --skip-tests
+```
+
+如需生成安装包，需要先安装 Inno Setup，并确保 `ISCC.exe` 在 PATH 中：
+
+```bat
+build_windows_release.bat --installer --skip-tests
+```
+
 ## 测试与检查
 
-基础 smoke check：
+基础检查：
 
 ```bash
 python scripts/smoke_check.py --strict
@@ -194,12 +219,49 @@ python scripts/package_release.py
 
 ## GitHub 上传前检查清单
 
-- 不包含 `.env`。
-- 不包含 Cookie、账号、监控记录、解析历史、任务记录。
+上传前建议确认：
+
+- 不包含 `.git/`、`.venv/`、`build/`、`dist/`。
+- 不包含 `.env`、真实 Cookie、账号列表、监控记录、解析历史、任务记录。
 - 不包含 `data/`、`logs/`、`cache/`、`downloads/`、`diagnostics/`。
-- 不包含 `__pycache__/`、`.pytest_cache/`、`.venv/`。
-- `crawlers/*/config.yaml` 中的 `Cookie`、`msToken`、`ttwid.cookie` 等字段为空。
-- README 能在 GitHub 首页说明安装、运行和打包方式。
+- 不包含 `__pycache__/`、`.pytest_cache/`、`.ruff_cache/`。
+- `crawlers/*/config.yaml` 中的 `Cookie`、`msToken`、`ttwid.cookie` 等字段为空或由运行时生成。
+- README 截图中不暴露真实账号、Cookie、私密链接或下载路径。
+
+## 更新到 GitHub
+
+如果远程仓库已经存在：
+
+```bash
+git clone git@github.com:Syuanya/douyin_monitor.git
+cd douyin_monitor
+```
+
+把本项目文件复制到仓库目录后执行：
+
+```bash
+git status
+git add .
+git commit -m "Update douyin monitor project"
+git push origin main
+```
+
+如果当前远程仓库使用 `master` 分支，请把最后一行改成：
+
+```bash
+git push origin master
+```
+
+如果是第一次初始化仓库：
+
+```bash
+git init
+git branch -M main
+git remote add origin git@github.com:Syuanya/douyin_monitor.git
+git add .
+git commit -m "Initial commit"
+git push -u origin main
+```
 
 ## 风险说明
 

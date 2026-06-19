@@ -1259,27 +1259,20 @@ class DouyinContentMonitorManager:
                 parser_error = str(exc)
                 logger.debug(f"Douyin parser sync failed, trying public profile fallback: {exc}")
                 items = []
+            public_errors: list[str] = []
             if not items:
-                try:
-                    page_text, final_url = await self.fetch_public_profile(account)
-                    if self._public_profile_page_matches_account(account, page_text, final_url):
-                        self._safe_update_homepage_from_final_url(account, final_url)
-                        items = self.parse_public_profile_items(page_text)
-                    else:
-                        logger.debug(
-                            "Skip sync public-profile fallback because fetched page does not match target: "
-                            f"account={account.account_id}, final_url={sanitize_url(final_url)}"
-                        )
-                except Exception as exc:
-                    if parser_error:
-                        return {"success": False, "reason": f"解析器获取作品失败：{parser_error}；公开主页回退失败：{exc}", "total": 0, "new": 0}
-                    logger.debug(f"Douyin public profile fallback during sync failed: {exc}")
+                items, public_errors = await self._fetch_public_profile_items_for_sync(account)
             if not items:
+                count_result = await self._sync_account_by_profile_count(account, parser_error=parser_error, public_errors=public_errors)
+                if count_result:
+                    return count_result
+                details = self._sync_failure_detail(parser_error, public_errors)
                 return {
                     "success": False,
                     "reason": (
-                        "未返回作品列表。请检查抖音 Cookie、X-Bogus/A_Bogus 签名能力，"
-                        "以及该博主主页是否有公开作品。"
+                        "未返回作品列表。"
+                        + details
+                        + "请稍后重试，或更换可用 Cookie / 降低批量频率；如果该主页无公开作品，也会出现此结果。"
                     ),
                     "total": 0,
                     "new": 0,
@@ -1305,6 +1298,104 @@ class DouyinContentMonitorManager:
             self.services.broadcast_pubsub("douyin_monitor_update", {"event": "checked", "account_id": account_id})
             self._schedule_auto_download(account, new_items)
             return {"success": True, "reason": account.status, "total": len(items), "new": len(new_items)}
+
+    async def _fetch_public_profile_items_for_sync(self, account: DouyinMonitorAccount) -> tuple[list[DouyinContentItem], list[str]]:
+        errors: list[str] = []
+        for include_cookie, label in ((False, "无 Cookie 公开主页"), (True, "Cookie 公开主页")):
+            try:
+                page_text, final_url = await self.fetch_public_profile(account, include_cookie=include_cookie)
+            except Exception as exc:
+                message = f"{label}请求失败：{exc}"
+                errors.append(message)
+                logger.debug(f"Douyin sync public profile fallback failed: {message}")
+                continue
+            if not self._public_profile_page_matches_account(account, page_text, final_url):
+                message = f"{label}返回页与目标账号不匹配"
+                errors.append(message)
+                logger.debug(
+                    "Skip sync public-profile fallback because fetched page does not match target: "
+                    f"source={label}, account={account.account_id}, final_url={sanitize_url(final_url)}"
+                )
+                continue
+            self._safe_update_homepage_from_final_url(account, final_url)
+            items = self.parse_public_profile_items(page_text)
+            if items:
+                return items, errors
+            errors.append(f"{label}未识别到作品 ID")
+        return [], errors
+
+    async def _sync_account_by_profile_count(
+        self,
+        account: DouyinMonitorAccount,
+        *,
+        parser_error: str = "",
+        public_errors: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            profile_info = await self.fetch_user_profile_info(account)
+        except Exception as exc:
+            logger.debug(f"Douyin sync profile count fallback failed: {exc}")
+            return None
+        if not self._profile_info_matches_account(account, profile_info):
+            return None
+        aweme_count = self._parse_int(profile_info.get("aweme_count"), -1)
+        if aweme_count < 0:
+            return None
+        if profile_info.get("douyin_nickname") and not account.douyin_nickname:
+            account.douyin_nickname = profile_info["douyin_nickname"]
+            self._auto_fill_display_name(account)
+        if profile_info.get("avatar_url"):
+            account.avatar_url = profile_info["avatar_url"]
+
+        now = self._now()
+        previous_count = account.aweme_count if account.aweme_count >= 0 else account.last_aweme_count
+        first_success = previous_count < 0 and not account.items and not account.known_item_ids
+        delta = max(0, aweme_count - previous_count) if previous_count >= 0 else 0
+        new_items: list[DouyinContentItem] = []
+        if delta:
+            item = DouyinContentItem(
+                item_id=f"count-{aweme_count}-{int(time.time())}",
+                title=f"作品数量增加 {delta} 个（当前 {aweme_count} 个，未获取到作品明细）",
+                share_url=account.homepage_url,
+                publish_time="",
+                first_seen_time=now,
+                last_seen_time=now,
+                status="count_only",
+            )
+            account.items.insert(0, item)
+            account.items = account.items[:200]
+            new_items.append(item)
+
+        account.last_check_time = now
+        account.last_success_time = now
+        account.last_error = ""
+        account.error_count = 0
+        account.aweme_count = aweme_count
+        account.last_aweme_count = aweme_count
+        account.last_new_count = len(new_items)
+        account.total_new_count += len(new_items)
+        account.status = "已同步作品数量基线" if first_success else ("已发现作品数量变化" if new_items else "作品数量无变化")
+        self._apply_account_retention(account)
+        self._record_monitor_history(account, True, account.status, len(new_items))
+        await self.persist()
+        self._write_detection_log(
+            f"Synced Douyin profile count fallback: name={account.display_name or account.douyin_nickname}, "
+            f"aweme_count={aweme_count}, new={len(new_items)}, parser_error={sanitize_text(parser_error)}, "
+            f"public_errors={sanitize_text('; '.join(public_errors or []))}, url={account.homepage_url}"
+        )
+        self.services.broadcast_pubsub("douyin_monitor_update", {"event": "checked", "account_id": account.account_id})
+        reason = account.status + "；暂未获取作品明细，已保留数量基线，稍后可再次同步明细"
+        return {"success": True, "reason": reason, "total": aweme_count, "new": len(new_items)}
+
+    @staticmethod
+    def _sync_failure_detail(parser_error: str = "", public_errors: list[str] | None = None) -> str:
+        parts: list[str] = []
+        if parser_error:
+            parts.append(f"解析器失败：{parser_error}")
+        for item in public_errors or []:
+            if item:
+                parts.append(item)
+        return ("原因：" + "；".join(parts) + "。") if parts else ""
 
     def _merge_detected_items(self, account: DouyinMonitorAccount, detected_items: list[DouyinContentItem]) -> list[DouyinContentItem]:
         for item in detected_items:

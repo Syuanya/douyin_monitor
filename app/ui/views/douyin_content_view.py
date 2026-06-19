@@ -1402,25 +1402,27 @@ class DouyinContentMonitorPage(PageBase):
             return False
         try:
             await asyncio.sleep(0.08)
-            result = self.cards_area.scroll_to(
-                key=self._account_anchor_key(account_id),
-                duration=0,
-            )
-            if inspect.isawaitable(result):
-                await result
-            return True
-        except Exception as exc:
-            logger.debug(f"restore account scroll position failed: {exc}")
-            offset = self._account_anchor_offset(account_id)
-            if offset is None:
-                return False
-            try:
-                result = self.cards_area.scroll_to(offset=offset, duration=0)
+            scroll_to = getattr(self.cards_area, "scroll_to", None)
+            if callable(scroll_to) and "key" in inspect.signature(scroll_to).parameters:
+                result = scroll_to(
+                    key=self._account_anchor_key(account_id),
+                    duration=0,
+                )
                 if inspect.isawaitable(result):
                     await result
                 return True
-            except Exception as fallback_exc:
-                logger.debug(f"restore account scroll fallback failed: {fallback_exc}")
+        except Exception as exc:
+            logger.debug(f"restore account scroll position failed: {exc}")
+        offset = self._account_anchor_offset(account_id)
+        if offset is None:
+            return False
+        try:
+            result = self.cards_area.scroll_to(offset=offset, duration=0)
+            if inspect.isawaitable(result):
+                await result
+            return True
+        except Exception as fallback_exc:
+            logger.debug(f"restore account scroll fallback failed: {fallback_exc}")
         return False
 
     async def load_more_works(self):
