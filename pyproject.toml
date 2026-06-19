@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [
+    ".venv",
+    "__pycache__",
+    "dist",
+    "downloads",
+    "logs",
+    "diagnostics",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",
+    "B904",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

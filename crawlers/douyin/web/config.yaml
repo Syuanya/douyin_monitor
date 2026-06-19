@@ -1,0 +1,22 @@
+TokenManager:
+  douyin:
+    headers:
+      Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2
+      User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+        like Gecko) Chrome/90.0.4430.212 Safari/537.36
+      Referer: https://www.douyin.com/
+      Cookie: ''
+    proxies:
+      http: null
+      https: null
+    msToken:
+      url: https://mssdk.bytedance.com/web/report?msToken=
+      magic: 538969122
+      version: 1
+      dataType: 8
+      strData: ''
+      User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+        like Gecko) Chrome/119.0.0.0 Safari/537.36
+    ttwid:
+      url: https://ttwid.bytedance.com/ttwid/union/register/
+      data: '{"aid":6383,"service":"www.douyin.com","union":false,"unionHost":"","needFid":false,"fid":"","migrate_priority":0}'

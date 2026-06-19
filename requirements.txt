@@ -1,0 +1,16 @@
+flet[desktop,cli]==0.85.0
+flet-video==0.85.0
+httpx>=0.28.1
+python-dotenv>=1.2.1
+loguru>=0.7.3
+Pillow>=10.0.0
+plyer>=2.1.0
+PyYAML>=6.0.1
+qrcode>=7.4.2
+pydantic>=2.7.0
+pycryptodomex>=3.20.0
+gmssl>=3.2.2
+browser-cookie3>=0.19.1
+ua-parser>=0.18.0
+user-agents>=2.2.0
+tenacity>=9.0.0

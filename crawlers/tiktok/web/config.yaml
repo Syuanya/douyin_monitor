@@ -1,0 +1,24 @@
+TokenManager:
+  tiktok:
+    headers:
+      User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+        like Gecko) Chrome/90.0.4430.212 Safari/537.36
+      Referer: https://www.tiktok.com/
+      Cookie: ''
+    proxies:
+      http: null
+      https: null
+    msToken:
+      url: https://mssdk.tiktokw.us/web/report?msToken=
+      magic: 538969122
+      version: 1
+      dataType: 8
+      strData: ''
+      User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+        like Gecko) Chrome/119.0.0.0 Safari/537.36
+    ttwid:
+      url: https://www.tiktok.com/ttwid/check/
+      data: '{"aid":1988,"service":"www.tiktok.com","union":false,"unionHost":"","needFid":false,"fid":"","migrate_priority":0}'
+      cookie: ''
+    odin_tt:
+      url: ''

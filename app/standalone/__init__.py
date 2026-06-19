@@ -1,0 +1,1 @@
+"""Standalone application shells."""

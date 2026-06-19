@@ -1,0 +1,45 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Runtime output
+/logs/
+/downloads/
+/diagnostics/
+/cache/
+/data/
+/build/
+/dist/
+*.spec
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+config/accounts.json
+config/cookies.json
+config/cookies.secure.json
+config/douyin_content_monitor.json
+config/parse_history.json
+config/recordings.json
+config/task_records.json
+config/user_settings.json
+config/web_auth.json
+config/*.tmp
+config/*.bak
+
+# OS / database / temp files
+.DS_Store
+*.tmp
+*.bak
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
