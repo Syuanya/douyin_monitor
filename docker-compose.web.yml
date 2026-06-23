@@ -1,0 +1,19 @@
+services:
+  douyin-monitor-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
+    container_name: douyin-monitor-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      PYTHONPATH: /app
+      DOUYIN_MONITOR_WEB_TOKEN: "change-me"
+      DOUYIN_MONITOR_RUN_PATH: /data
+    volumes:
+      - ./data:/data
+      - ./downloads:/data/downloads

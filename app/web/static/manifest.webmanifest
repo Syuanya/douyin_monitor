@@ -1,0 +1,9 @@
+{
+  "name": "Douyin Monitor Web",
+  "short_name": "DouyinMonitor",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#2f669f",
+  "description": "Linux 远程内容监控与视频解析控制台"
+}

@@ -9,6 +9,8 @@ import flet as ft
 @dataclass(slots=True)
 class BatchImportControls:
     text_field: ft.TextField
+    file_path_field: ft.TextField
+    preview_text: ft.Text
     default_group: ft.TextField
     start_switch: ft.Switch
     notify_switch: ft.Switch
@@ -55,17 +57,24 @@ def build_work_bulk_action_rows(view, account: Any, has_selected: bool) -> list[
     ]
 
 
-def build_batch_import_dialog(on_submit: Callable[[BatchImportControls], Any], on_close: Callable[..., Any]) -> BatchImportControls:
+def build_batch_import_dialog(
+    on_submit: Callable[[BatchImportControls], Any],
+    on_close: Callable[..., Any],
+    on_preview: Callable[[BatchImportControls], Any] | None = None,
+    on_pick_file: Callable[[BatchImportControls], Any] | None = None,
+) -> BatchImportControls:
     text_field = ft.TextField(
         label="批量账号",
-        hint_text="一行一个主页链接，也支持：主页链接,备注,分组",
+        hint_text="一行一个主页链接，也支持：主页链接,备注,分组。可先预览再导入。",
         multiline=True,
         min_lines=8,
         max_lines=14,
         width=680,
     )
+    file_path_field = ft.TextField(label="导入文件", hint_text="支持 TXT / CSV，可选择文件或手动粘贴路径", width=560)
+    preview_text = ft.Text("尚未预览。导入前会自动校验重复和无效行。", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
     default_group = ft.TextField(label="默认分组", width=320, hint_text="可选")
-    start_switch = ft.Switch(label="导入后立即开始监控", value=True)
+    start_switch = ft.Switch(label="导入后立即开始监控", value=False)
     notify_switch = ft.Switch(label="发现新作品时通知", value=True)
     policy_dropdown = ft.Dropdown(
         label="新增作品自动下载",
@@ -80,6 +89,8 @@ def build_batch_import_dialog(on_submit: Callable[[BatchImportControls], Any], o
     )
     controls = BatchImportControls(
         text_field=text_field,
+        file_path_field=file_path_field,
+        preview_text=preview_text,
         default_group=default_group,
         start_switch=start_switch,
         notify_switch=notify_switch,
@@ -92,8 +103,22 @@ def build_batch_import_dialog(on_submit: Callable[[BatchImportControls], Any], o
         content=ft.Column(
             controls=[
                 text_field,
+                ft.Row(
+                    [
+                        file_path_field,
+                        ft.IconButton(
+                            icon=ft.Icons.UPLOAD_FILE,
+                            tooltip="选择 TXT / CSV 文件导入",
+                            on_click=(lambda e: on_pick_file(controls)) if on_pick_file else None,
+                            icon_color=ft.Colors.PRIMARY,
+                        ),
+                    ],
+                    spacing=8,
+                    wrap=True,
+                ),
                 ft.Row([default_group, policy_dropdown], spacing=10, wrap=True),
                 ft.Row([start_switch, notify_switch], spacing=10, wrap=True),
+                preview_text,
             ],
             tight=True,
             spacing=10,
@@ -101,7 +126,8 @@ def build_batch_import_dialog(on_submit: Callable[[BatchImportControls], Any], o
         ),
         actions=[
             ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=on_close),
-            ft.FilledButton("导入", icon=ft.Icons.ADD, on_click=lambda e: on_submit(controls)),
+            ft.TextButton("预览", icon=ft.Icons.FACT_CHECK, on_click=(lambda e: on_preview(controls)) if on_preview else None),
+            ft.FilledButton("确认导入", icon=ft.Icons.ADD, on_click=lambda e: on_submit(controls)),
         ],
     )
     controls.dialog = dialog

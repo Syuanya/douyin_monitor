@@ -113,7 +113,15 @@ def main() -> int:
             errors.append(f"home dashboard runtime marker missing: {marker}")
 
     content_view_text = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
-    content_monitor_text = (ROOT / "app/core/content_monitor/douyin_content_monitor.py").read_text(encoding="utf-8")
+    content_monitor_text = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in (
+        "app/core/content_monitor/douyin_content_monitor.py",
+        "app/core/content_monitor/facade.py",
+        "app/core/content_monitor/services/base_service.py",
+        "app/core/content_monitor/services/monitor_common.py",
+        "app/core/content_monitor/services/cookie_runtime.py",
+        "app/core/content_monitor/services/download_service.py",
+        "app/core/content_monitor/services/profile_sync_service.py",
+    ))
     if "def _is_active_page" not in content_view_text or "if not self._is_active_page():" not in content_view_text:
         errors.append("douyin content render guard missing: background downloads may redraw another page")
     if "self.content_area.update()" in content_view_text:
@@ -148,7 +156,11 @@ def main() -> int:
         errors.append("content monitor no-public-items fallback missing")
 
     video_parse_text = (ROOT / "app/ui/views/video_parse_view.py").read_text(encoding="utf-8")
-    video_parser_service_text = (ROOT / "app/core/media/video_parser_service.py").read_text(encoding="utf-8")
+    video_parser_service_text = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in (
+        "app/core/media/video_parser_service.py",
+        "app/core/media/parser_cookie_pool.py",
+        "app/core/media/douyin_user_posts_client.py",
+    ))
     if "VideoPlayer(self.app).preview_video" not in video_parse_text:
         errors.append("video parse preview should use the legacy modal VideoPlayer")
     if "webbrowser.open" in video_parse_text or "set_clipboard" in video_parse_text:
@@ -277,16 +289,23 @@ def main() -> int:
     for marker in ("_queue_summary_card", "running_labels", "waiting_labels"):
         if marker not in task_view_text and marker not in queue_text:
             errors.append(f"queue visibility marker missing: {marker}")
-    for marker in ('"retryable"', '"today"', '"downloading"', "_record_time"):
-        if marker not in task_view_text:
-            errors.append(f"task quick filter marker missing: {marker}")
+    for removed_marker in ("export_tasks_csv", "open_task_export_dir", "clear_completed", "clear_failed", "clear_cancelled", "set_category_filter"):
+        if removed_marker in task_view_text:
+            errors.append(f"task center should not expose removed nonessential action: {removed_marker}")
+    for removed_text in ("导出全部任务记录 CSV", "打开任务导出目录", "清除已完成任务记录", "清除失败任务记录", "清除已取消任务记录", "全部类型"):
+        if removed_text in task_view_text:
+            errors.append(f"task center still contains removed UI text: {removed_text}")
     if "self.records_area = ft.Column(controls=[], spacing=8, expand=True)" in task_view_text:
         errors.append("task center records area must not use expand=True inside a scrollable content area")
     if "ft.VerticalDivider(width=12)" in task_view_text:
         errors.append("task center toolbar must not use VerticalDivider in wrapped rows; it can stretch the page into a grey block")
-    for marker in ("_filter_group", "height=30", "border_radius=15"):
+    if "ft.TextField" in task_view_text:
+        errors.append("task center must not use TextField; this Flet build can render it as a large grey block")
+    if "ft.Container(\n                    padding=16" in task_view_text and "暂无匹配任务记录" in task_view_text:
+        errors.append("task center empty state must stay plain text, not a decorated placeholder")
+    for marker in ("_filter_area", "height=30", "border_radius=15", "_count_summary", "清空记录"):
         if marker not in task_view_text:
-            errors.append(f"task center compact filter marker missing: {marker}")
+            errors.append(f"task center compact simplified marker missing: {marker}")
 
     settings_text = (ROOT / "app/ui/views/settings_view.py").read_text(encoding="utf-8")
     for marker in ("DOWNLOAD_STRATEGIES", "download_strategy_dropdown", "max_parallel_downloads_field", "apply_download_strategy", '"download_strategy_preset"', '"max_parallel_downloads"'):

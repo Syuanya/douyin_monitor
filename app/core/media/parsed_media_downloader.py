@@ -87,11 +87,19 @@ class ParsedMediaDownloader:
             return {"success": True, "reason": "图集文件已存在", "path": save_dir, "files": files}
 
         async def run_download() -> str:
-            for index, url in enumerate(urls, start=1):
+            limit = self._gallery_image_concurrency()
+            sem = asyncio.Semaphore(limit)
+
+            async def download_one(index: int, url: str) -> None:
                 save_path = os.path.join(save_dir, f"{self._safe_item_id(item)}_{index:03d}.png")
                 if self._valid_file(save_path):
-                    continue
-                await self._download_image_as_png(url, save_path)
+                    return
+                async with sem:
+                    if self._valid_file(save_path):
+                        return
+                    await self._download_image_as_png(url, save_path)
+
+            await asyncio.gather(*(download_one(index, url) for index, url in enumerate(urls, start=1)))
             return save_dir
 
         path = await self.services.media_task_queue.run(
@@ -217,12 +225,17 @@ class ParsedMediaDownloader:
                 save_path,
                 headers=headers,
                 timeout=self._download_timeout(),
-                chunk_size=1024 * 256,
+                proxy=self._proxy_url(),
+                client_pool=getattr(self.services, "download_http_client_pool", None),
+                chunk_size=self._download_chunk_size(),
                 progress_interval=self._progress_interval(),
                 progress_formatter=self._download_progress_text,
                 progress_reporter=report_media_task_progress,
                 progress_callback=(lambda downloaded, total: recovery.mark_progress(download_id, downloaded, total)) if recovery and download_id else None,
                 resume_enabled=self._resume_enabled(),
+                segmented_enabled=self._segmented_download_enabled(),
+                segmented_parts=self._segmented_download_parts(),
+                segmented_min_size_mb=self._segmented_download_min_size_mb(),
             )
             if recovery and download_id:
                 recovery.mark_completed(download_id)
@@ -234,6 +247,56 @@ class ParsedMediaDownloader:
             if recovery and download_id:
                 recovery.mark_failed(download_id, str(exc))
             raise
+
+
+    def _download_chunk_size(self) -> int:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        try:
+            kb = int(config.get("download_chunk_size_kb", 512) or 512)
+        except (TypeError, ValueError):
+            kb = 512
+        return max(64, min(8192, kb)) * 1024
+
+    def _gallery_image_concurrency(self) -> int:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        try:
+            value = int(config.get("gallery_image_concurrency", 4) or 4)
+        except (TypeError, ValueError):
+            value = 4
+        return max(1, min(12, value))
+
+    def _proxy_url(self) -> str | None:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        if not config.get("enable_proxy"):
+            return None
+        return str(config.get("proxy_address") or "").strip() or None
+
+    def _segmented_download_enabled(self) -> bool:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        value = config.get("segmented_download_enabled", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _segmented_download_parts(self) -> int:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        try:
+            return max(2, min(16, int(config.get("segmented_download_parts", 4) or 4)))
+        except (TypeError, ValueError):
+            return 4
+
+    def _segmented_download_min_size_mb(self) -> int:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        try:
+            return max(1, int(config.get("segmented_download_min_size_mb", 50) or 50))
+        except (TypeError, ValueError):
+            return 50
 
     def _download_timeout(self) -> httpx.Timeout:
         settings = getattr(self.services, "settings_config", None)

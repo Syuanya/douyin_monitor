@@ -5,10 +5,17 @@ from typing import Any
 import flet as ft
 
 
+def has_pending_new_work(account: Any) -> bool:
+    for item in getattr(account, "items", []) or []:
+        if str(getattr(item, "status", "") or "") in {"new", "count_only"}:
+            return True
+    return False
+
+
 def account_status_meta(account: Any) -> dict[str, Any]:
     if getattr(account, "last_error", "") or "异常" in str(getattr(account, "status", "")):
         return {"label": "异常", "color": ft.Colors.ORANGE, "icon": ft.Icons.WARNING_AMBER}
-    if getattr(account, "last_new_count", 0):
+    if has_pending_new_work(account):
         return {"label": "有新作品", "color": ft.Colors.PRIMARY, "icon": ft.Icons.NEW_RELEASES}
     if getattr(account, "monitor_enabled", False):
         return {"label": "监控中", "color": ft.Colors.GREEN, "icon": ft.Icons.RADAR}

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
-    from ..douyin_content_monitor import DouyinContentItem
+    from ..models import DouyinContentItem
 else:
     DouyinContentItem = Any
 

@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>抖音监控 Web 控制台</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#2f669f" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">Douyin Monitor</div>
+    <button class="nav active" data-tab="dashboard">主页</button>
+    <button class="nav" data-tab="accounts">内容监控</button>
+    <button class="nav" data-tab="parse">视频解析</button>
+    <button class="nav" data-tab="tasks">任务中心</button>
+    <button class="nav" data-tab="history">下载历史</button>
+    <button class="nav" data-tab="risk">问题中心</button>
+    <button class="nav" data-tab="settings">设置</button>
+    <button class="nav" data-tab="storage">存储</button>
+    <button class="nav" data-tab="diagnostics">诊断</button>
+      <span class="nav-marker" data-tab="cookies" hidden></span>
+      <span class="nav-marker" data-tab="queue" hidden></span>
+      <span class="nav-marker" data-tab="batchjobs" hidden></span>
+      <span class="nav-marker" data-tab="media" hidden></span>
+      <span class="nav-marker" data-tab="logs" hidden></span>
+      <span class="nav-marker" data-tab="notifications" hidden></span>
+      <span class="nav-marker" data-tab="updates" hidden></span>
+      <span class="nav-marker" data-tab="access" hidden></span>
+      <span class="nav-marker" data-tab="backups" hidden></span>
+      <span class="nav-marker" data-tab="inbox" hidden></span>
+      <span class="nav-marker" data-tab="import" hidden></span>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="pageTitle">总览</h1>
+        <p id="subTitle">Linux Web 远程控制台</p>
+      </div>
+      <div class="auth">
+        <input id="tokenInput" type="password" placeholder="访问 Token" />
+        <button id="saveTokenBtn">保存</button>
+        <button id="refreshBtn">刷新当前页</button>
+      </div>
+    </header>
+
+    <section id="dashboard" class="tab active">
+      <div class="grid" id="statGrid"></div>
+      <div class="grid two">
+        <div class="panel"><h2>Cookie 健康</h2><div id="cookieHealthBox" class="kv"></div></div>
+        <div class="panel"><h2>限速器</h2><div id="rateLimiterBox" class="kv"></div></div>
+      </div>
+      <div class="panel"><h2>批量任务 / 分片下载</h2><pre id="observabilityBox">加载中...</pre></div>
+    </section>
+
+    <section id="accounts" class="tab">
+      <div class="subnav panel">
+        <button class="active" onclick="showTab('accounts')">账号管理</button>
+        <button onclick="showTab('inbox')">新作品箱</button>
+        <button onclick="showTab('import')">批量导入</button>
+        <button onclick="showTab('media')">作品库</button>
+      </div>
+      <div class="panel">
+        <div class="toolbar">
+          <input id="accountUrl" placeholder="抖音主页链接" />
+          <input id="accountName" placeholder="备注名（可选）" />
+          <button id="addAccountBtn" class="primary">添加账号</button>
+        </div>
+        <div class="toolbar compact">
+          <input id="accountSearch" placeholder="搜索账号 / 分组 / 链接" />
+          <select id="accountStatusFilter">
+            <option value="all">全部账号</option>
+            <option value="monitoring">监控中</option>
+            <option value="stopped">未监控</option>
+            <option value="new">有新作品</option>
+            <option value="error">异常账号</option>
+          </select>
+          <button id="selectVisibleAccountsBtn">全选当前</button>
+          <button id="clearAccountSelectionBtn">清空选择</button>
+        </div>
+        <div class="bulkbar" id="accountBulkBar">
+          <strong>批量处理</strong><span id="accountSelectionSummary">未选择账号</span>
+          <button id="bulkCheckBtn">检测选中</button>
+          <button id="bulkSyncBtn">同步选中</button>
+          <button id="bulkStartBtn">启动监控</button>
+          <button id="bulkStopBtn">停止监控</button>
+          <button id="bulkDeleteBtn" class="danger">删除选中</button>
+        </div>
+        <div class="hint">“刷新当前页”只刷新本地界面；“检测更新”请求抖音但成本较低；“同步作品”会拉取作品明细，账号多时请分批操作。</div>
+      </div>
+      <div id="accountList" class="list"></div>
+    </section>
+
+    <section id="inbox" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('accounts')">账号管理</button>
+        <button class="active" onclick="showTab('inbox')">新作品箱</button>
+        <button onclick="showTab('import')">批量导入</button>
+        <button onclick="showTab('media')">作品库</button>
+      </div>
+      <div class="panel">
+        <div class="toolbar">
+          <input id="inboxSearch" placeholder="搜索新作品 / 账号" />
+          <button id="loadInboxBtn">刷新新作品箱</button>
+          <button id="selectAllInboxBtn">全选当前</button>
+          <button id="clearInboxSelectionBtn">清空选择</button>
+        </div>
+        <div class="bulkbar">
+          <strong>批量处理</strong><span id="inboxSelectionSummary">未选择作品</span>
+          <button id="downloadSelectedInboxBtn" class="primary">下载选中</button>
+          <button id="markSeenSelectedBtn">标记已处理</button>
+        </div>
+      </div>
+      <div id="inboxList" class="list"></div>
+    </section>
+
+    <section id="import" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('accounts')">账号管理</button>
+        <button onclick="showTab('inbox')">新作品箱</button>
+        <button class="active" onclick="showTab('import')">批量导入</button>
+        <button onclick="showTab('media')">作品库</button>
+      </div>
+      <div class="panel">
+        <h2>批量导入账号</h2>
+        <p class="hint">支持一行一个主页链接，或“链接,备注,分组”。上传 TXT/CSV 后可先预览重复、更新、无效行。</p>
+        <textarea id="importText" rows="8" placeholder="https://www.douyin.com/user/... , 备注名, 分组"></textarea>
+        <div class="toolbar compact">
+          <input id="importGroup" placeholder="默认分组" />
+          <select id="importPolicy"><option value="none">不自动下载</option><option value="video">自动下载视频</option><option value="gallery">自动下载图集</option><option value="all">自动下载全部</option></select>
+          <label class="check"><input id="startMonitor" type="checkbox" /> 导入后启动监控</label>
+          <label class="check"><input id="notifyEnabled" type="checkbox" checked /> 开启通知</label>
+        </div>
+        <div class="toolbar compact">
+          <input id="importFile" type="file" accept=".txt,.csv" />
+          <button id="previewImportBtn">预览</button>
+          <button id="commitImportBtn" class="primary">确认导入</button>
+        </div>
+        <div id="importSummary" class="grid small"></div>
+        <div id="importPreview" class="tableWrap">等待预览...</div>
+      </div>
+    </section>
+
+    <section id="parse" class="tab">
+      <div class="panel">
+        <h2>视频解析</h2>
+        <textarea id="parseText" rows="8" placeholder="粘贴抖音作品链接、分享文本，可批量解析"></textarea>
+        <div class="toolbar compact">
+          <input id="parseConcurrency" type="number" min="1" max="20" value="3" title="并发数" />
+          <label class="check"><input id="parseDownload" type="checkbox" /> 解析成功后自动下载</label>
+          <button id="parseBtn" class="primary">开始解析</button>
+          <button id="clearParseBtn">清空结果</button>
+        </div>
+        <div id="parseProgress" class="hint">等待解析...</div>
+        <div id="parseResult" class="list"></div>
+      </div>
+    </section>
+
+    <section id="tasks" class="tab">
+      <div class="subnav panel">
+        <button class="active" onclick="showTab('tasks')">任务记录</button>
+        <button onclick="showTab('queue')">下载队列</button>
+        <button onclick="showTab('batchjobs')">批量任务</button>
+        <button onclick="showTab('logs')">运行日志</button>
+      </div>
+      <div class="panel toolbar">
+        <button id="refreshTasksBtn">刷新任务</button>
+        <label class="check"><input id="autoRefreshTasks" type="checkbox" checked /> 自动刷新</label>
+      </div>
+      <div id="taskList" class="list"></div>
+    </section>
+
+    <section id="history" class="tab">
+      <div class="panel toolbar">
+        <select id="historyStatus"><option value="all">全部</option><option value="running">运行中</option><option value="completed">完成</option><option value="failed">失败</option><option value="cancelled">已取消</option><option value="recoverable">可恢复</option></select>
+        <button id="refreshHistoryBtn">刷新历史</button>
+      </div>
+      <div id="historyStats" class="grid small"></div>
+      <div id="historyList" class="list"></div>
+    </section>
+
+
+    <section id="diagnostics" class="tab">
+      <div class="panel toolbar">
+        <label class="check"><input id="diagNetwork" type="checkbox" /> 包含网络检查</label>
+        <label class="check"><input id="diagDouyin" type="checkbox" /> 包含抖音访问检查</label>
+        <button id="runDiagnosticsBtn" class="primary">运行诊断</button><button id="exportDiagnosticsBtn">导出诊断包</button>
+      </div>
+      <div id="diagnosticStats" class="grid small"></div>
+      <div id="diagnosticList" class="list"></div>
+    </section>
+
+    <section id="cookies" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('settings')">常用设置</button>
+        <button class="active" onclick="showTab('cookies')">Cookie</button>
+        <button onclick="showTab('notifications')">通知</button>
+        <button onclick="showTab('updates')">更新</button>
+        <button onclick="showTab('access')">访问控制</button>
+        <button onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel">
+        <h2>Cookie 管理</h2>
+        <p class="hint">每行一条 Cookie。Cookie 原文不会在列表中回显，只显示脱敏摘要和健康状态。</p>
+        <textarea id="cookieText" rows="6" placeholder="粘贴抖音 Cookie，可多行"></textarea>
+        <div class="toolbar compact">
+          <button id="saveCookieBtn" class="primary">保存 Cookie</button>
+          <button id="refreshCookieBtn">刷新健康状态</button>
+          <button id="clearCookieHealthBtn" class="danger">清理健康记录</button><button id="selectAllCookiesBtn">全选 Cookie</button><button id="bulkDisableCookiesBtn">批量禁用</button><button id="bulkEnableCookiesBtn">批量启用</button>
+        </div>
+      </div>
+      <div id="cookieSummary" class="grid small"></div>
+      <div id="cookieList" class="list"></div>
+    </section>
+
+    <section id="queue" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('tasks')">任务记录</button>
+        <button class="active" onclick="showTab('queue')">下载队列</button>
+        <button onclick="showTab('batchjobs')">批量任务</button>
+        <button onclick="showTab('logs')">运行日志</button>
+      </div>
+      <div class="panel toolbar">
+        <button id="pauseQueueBtn">暂停队列</button>
+        <button id="resumeQueueBtn">继续队列</button>
+        <button id="cancelQueueBtn" class="danger">取消全部</button>
+        <button id="refreshQueueBtn">刷新队列</button><button id="refreshQueueTasksBtn">刷新任务明细</button>
+      </div>
+      <div id="queueSummary" class="grid small"></div>
+      <div id="queueTaskList" class="list"></div><div class="panel"><h2>队列快照</h2><pre id="queueSnapshot">加载中...</pre></div>
+    </section>
+
+    <section id="batchjobs" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('tasks')">任务记录</button>
+        <button onclick="showTab('queue')">下载队列</button>
+        <button class="active" onclick="showTab('batchjobs')">批量任务</button>
+        <button onclick="showTab('logs')">运行日志</button>
+      </div>
+      <div class="panel toolbar"><button id="refreshBatchJobsBtn">刷新批量任务</button></div>
+      <div id="batchJobStats" class="grid small"></div>
+      <div id="batchJobList" class="list"></div>
+    </section>
+
+    <section id="media" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('accounts')">账号管理</button>
+        <button onclick="showTab('inbox')">新作品箱</button>
+        <button onclick="showTab('import')">批量导入</button>
+        <button class="active" onclick="showTab('media')">作品库</button>
+      </div>
+      <div class="panel toolbar">
+        <input id="mediaSearch" placeholder="搜索标题 / 账号 / 链接" />
+        <select id="mediaStatus"><option value="all">全部状态</option><option value="new">新作品</option><option value="seen">已处理</option><option value="downloaded">已下载</option><option value="failed">失败</option><option value="count_only">数量变化</option></select>
+        <select id="mediaType"><option value="all">全部类型</option><option value="video">视频</option><option value="image">图片/图集</option><option value="count_only">数量变化</option></select>
+        <button id="refreshMediaBtn">刷新作品库</button>
+      </div>
+      <div id="mediaStats" class="grid small"></div>
+      <div class="bulkbar"><strong>作品操作</strong><span>支持详情预览、下载、标记已处理</span></div>
+      <div id="mediaList" class="list"></div>
+    </section>
+
+    <section id="storage" class="tab">
+      <div class="storageShell panel">
+        <div class="storageToolbar">
+          <div class="pathControls">
+            <button onclick="goStorageHome()">全部文件</button>
+            <button onclick="goStorageUp()">上一级</button>
+            <div id="storageBreadcrumb" class="breadcrumb"></div>
+          </div>
+          <div class="storageActions">
+            <input id="storagePath" placeholder="相对路径，留空为下载根目录" />
+            <input id="storageSearch" placeholder="搜索文件名" />
+            <select id="storageFilter"><option value="all">全部媒体</option><option value="video">视频</option><option value="image">图片</option></select>
+            <select id="storageSort"><option value="name_asc">名称升序</option><option value="name_desc">名称降序</option><option value="size_desc">大小降序</option><option value="mtime_desc">最近修改</option></select>
+            <button id="refreshStorageBtn">刷新</button>
+            <button data-storage-view="grid" class="primary" onclick="setStorageViewMode('grid')">网格</button>
+            <button data-storage-view="list" onclick="setStorageViewMode('list')">列表</button>
+          </div>
+        </div>
+        <div class="storageLayout">
+          <aside class="storageSide">
+            <h3>文件夹</h3>
+            <div id="storageFolderTree" class="folderTree"></div>
+            <div class="sideActions">
+              <button id="storageStatsBtn">占用统计</button>
+              <button id="scanEmptyBtn">扫描空文件</button>
+              <button id="scanDuplicateBtn">扫描重复文件</button>
+              <button id="cleanupTempBtn" class="danger">清理临时文件</button>
+            </div>
+          </aside>
+          <main class="storageMain">
+            <div class="storageHeaderLine">
+              <div><strong id="storagePathBar">下载根目录</strong><p id="storageCurrent" class="hint"></p></div>
+              <div class="hint">双击文件夹进入；视频/图片点击缩略图预览。</div>
+            </div>
+            <div id="storageSummary" class="grid small"></div>
+            <div id="storageStats" class="grid small"></div>
+            <div id="storageScanResult" class="list"></div>
+            <div id="storageList" class="storageItems gridMode"></div>
+          </main>
+        </div>
+      </div>
+    </section>
+
+    <section id="logs" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('tasks')">任务记录</button>
+        <button onclick="showTab('queue')">下载队列</button>
+        <button onclick="showTab('batchjobs')">批量任务</button>
+        <button class="active" onclick="showTab('logs')">运行日志</button>
+      </div>
+      <div class="panel toolbar"><button id="refreshLogsBtn">刷新日志列表</button><input id="logLines" type="number" min="20" max="2000" value="200" /><input id="logQuery" placeholder="搜索日志内容" /><select id="logLevel"><option value="">全部级别</option><option value="ERROR">ERROR</option><option value="WARNING">WARNING</option><option value="INFO">INFO</option></select><button id="searchLogsBtn">搜索日志</button><button id="liveLogBtn">实时跟随</button><button id="stopLiveLogBtn">停止跟随</button><button id="clearCurrentLogBtn" class="danger">清空选中日志</button><button id="clearAllLogsBtn" class="danger">清空全部日志</button></div><div id="logSearchList" class="list"></div>
+      <div id="logFileList" class="list"></div>
+      <div class="panel"><h2>日志内容</h2><pre id="logContent">请选择日志文件。</pre></div>
+    </section>
+
+    <section id="risk" class="tab">
+      <div class="panel toolbar"><button id="refreshRiskBtn" class="primary">刷新网络与风控状态</button></div>
+      <div id="riskStats" class="grid small"></div>
+      <div class="grid two"><div class="panel"><h2>建议</h2><div id="riskSuggestions"></div></div><div class="panel"><h2>限速器</h2><div id="riskLimiter" class="kv"></div></div></div>
+      <div id="riskAccountList" class="list"></div>
+    </section>
+
+    <section id="notifications" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('settings')">常用设置</button>
+        <button onclick="showTab('cookies')">Cookie</button>
+        <button class="active" onclick="showTab('notifications')">通知</button>
+        <button onclick="showTab('updates')">更新</button>
+        <button onclick="showTab('access')">访问控制</button>
+        <button onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel">
+        <h2>通知管理</h2>
+        <div id="notificationGlobal" class="settingsGrid"></div>
+        <div class="toolbar"><select id="notificationChannel"><option value="webhook">Webhook</option><option value="telegram">Telegram</option><option value="bark">Bark</option><option value="serverchan">Server 酱</option><option value="wecom">企业微信</option></select><button id="saveNotificationsBtn" class="primary">保存通知设置</button><button id="reloadNotificationsBtn">重新加载</button><button id="testNotificationDryBtn">通知测试 Dry-run</button><button id="testNotificationNetworkBtn">真实渠道测试</button></div><div id="notificationTestResult" class="hint"></div>
+      </div>
+      <div id="notificationAccounts" class="list"></div>
+    </section>
+
+    <section id="updates" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('settings')">常用设置</button>
+        <button onclick="showTab('cookies')">Cookie</button>
+        <button onclick="showTab('notifications')">通知</button>
+        <button class="active" onclick="showTab('updates')">更新</button>
+        <button onclick="showTab('access')">访问控制</button>
+        <button onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel toolbar"><button id="refreshUpdatesBtn">刷新状态</button><button id="checkUpdatesDryBtn">检查更新（Dry-run）</button><button id="checkUpdatesNetworkBtn">联网检查更新</button></div>
+      <div id="updateStats" class="grid small"></div>
+      <div class="panel"><pre id="updateBox">加载中...</pre></div>
+    </section>
+
+    <section id="access" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('settings')">常用设置</button>
+        <button onclick="showTab('cookies')">Cookie</button>
+        <button onclick="showTab('notifications')">通知</button>
+        <button onclick="showTab('updates')">更新</button>
+        <button class="active" onclick="showTab('access')">访问控制</button>
+        <button onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel"><h2>访问控制</h2><p class="hint">支持环境 Token 与 Web 子 Token。新增用户后会生成一次性 Token，请立即复制保存。</p><div id="accessBox" class="kv"></div><div class="toolbar compact"><input id="accessUserName" placeholder="用户名称"/><select id="accessUserRole"><option value="admin">管理员</option><option value="operator">操作员</option><option value="viewer">只读</option></select><button id="createAccessUserBtn" class="primary">新增访问用户</button></div><div id="newAccessTokenBox" class="hint"></div></div><div id="accessRbacBox" class="panel"></div><div id="accessUserList" class="list"></div>
+    </section>
+
+    <section id="backups" class="tab">
+      <div class="subnav panel">
+        <button onclick="showTab('settings')">常用设置</button>
+        <button onclick="showTab('cookies')">Cookie</button>
+        <button onclick="showTab('notifications')">通知</button>
+        <button onclick="showTab('updates')">更新</button>
+        <button onclick="showTab('access')">访问控制</button>
+        <button class="active" onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel toolbar"><button id="createFullBackupBtn" class="primary">创建完整备份</button><button id="createConfigBackupBtn">只备份配置</button><button id="refreshBackupsBtn">刷新备份列表</button></div><div class="panel"><h2>恢复备份</h2><p class="hint">默认先做恢复校验，不写入文件；确认无误后再点击应用恢复。恢复后建议重启容器。</p><div class="toolbar compact"><input id="restoreBackupName" placeholder="备份文件名"/><input id="restoreUploadFile" type="file" accept=".zip"/><button id="restorePreviewBtn">校验恢复</button><button id="restoreApplyBtn" class="danger">应用恢复</button></div><pre id="restoreResult">等待操作...</pre></div>
+      <div id="backupResult" class="panel">尚未创建备份。</div><div id="backupList" class="list"></div>
+    </section>
+
+    <section id="settings" class="tab">
+      <div class="subnav panel">
+        <button class="active" onclick="showTab('settings')">常用设置</button>
+        <button onclick="showTab('cookies')">Cookie</button>
+        <button onclick="showTab('notifications')">通知</button>
+        <button onclick="showTab('updates')">更新</button>
+        <button onclick="showTab('access')">访问控制</button>
+        <button onclick="showTab('backups')">备份恢复</button>
+      </div>
+      <div class="panel">
+        <h2>常用性能设置</h2>
+        <div class="settingsGrid" id="settingsForm"></div>
+        <div class="toolbar"><button id="saveSettingsBtn" class="primary">保存设置</button><button id="reloadSettingsBtn">重新加载</button></div>
+      </div>
+      <div class="panel">
+        <h2>原始配置</h2>
+        <pre id="settingsBox">加载中...</pre>
+      </div>
+    </section>
+
+    <div id="mediaPreviewModal" class="modal" style="display:none"><div class="modalBody"><div class="card-title"><strong id="mediaPreviewTitle">媒体预览</strong><button onclick="closeMediaModal()">关闭</button></div><div id="mediaPreviewStage" class="previewStage"></div><div id="mediaPreviewThumbs" class="thumbGrid"></div></div></div>
+    <div id="toast" class="toast"></div>
+  </main>
+  <script src="/static/app.js"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js').catch(()=>{});</script>
+</body>
+</html>

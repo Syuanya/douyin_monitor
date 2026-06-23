@@ -10,7 +10,8 @@ from typing import Any
 
 import flet as ft
 
-from ...core.media.video_parser_service import ParseFailure, ParsedVideoResult, VideoParseBatchResult, VideoParserService
+from ...core.media.video_parser_service import ParseDownloadEvent, ParseFailure, ParseProgress, ParsedVideoResult, VideoParseBatchResult, VideoParserService
+from ...core.ui_services.video_parse_workflow import VideoParseWorkflow
 from ...core.parser.risk_model import classify_parser_failure
 from ...core.runtime.task_center import classify_failure
 from ...utils.logger import logger
@@ -35,6 +36,7 @@ class VideoParsePage(PageBase):
         self.parse_cancel_requested = False
         self.parse_progress_text = ""
         self.show_result_section = False
+        self.parse_workflow = VideoParseWorkflow(app)
         self.parse_history: list[dict[str, Any]] = self._load_parse_history()
         self.image_preview = ImagePreviewDialog(app, "解析图集")
         self.init()
@@ -152,39 +154,58 @@ class VideoParsePage(PageBase):
             task_center = getattr(self.app.services, "task_center", None)
             if task_center is not None:
                 task_id = task_center.start("批量解析作品链接", "视频解析", total=total)
-            for index, url in enumerate(urls, start=1):
+            parser = self.app.services.video_parser
+            settings = getattr(self.app.services, "settings_config", None)
+            pipeline_enabled = bool(
+                settings
+                and getattr(settings, "user_config", {}).get("batch_parse_download_pipeline_enabled", False)
+                and hasattr(parser, "parse_text_download_stream")
+                and hasattr(self.app.services, "parsed_media_downloader")
+            )
+            if pipeline_enabled:
+                download_concurrency = 3
+                try:
+                    download_concurrency = int(settings.user_config.get("batch_download_concurrency", settings.default_config.get("batch_download_concurrency", 3)))
+                except (TypeError, ValueError):
+                    download_concurrency = 3
+                stream = parser.parse_text_download_stream(
+                    text,
+                    self.app.services.parsed_media_downloader,
+                    download_concurrency=max(1, min(32, download_concurrency)),
+                )
+            else:
+                stream = parser.parse_text_stream(text) if hasattr(parser, "parse_text_stream") else None
+            if stream is None:
+                stream = self._parse_text_stream_compat(text)
+            async for event in stream:
                 if self.parse_cancel_requested:
                     break
-                self.parse_progress_text = f"解析进度：{index}/{total}，成功 {result.success_count}，失败 {result.failed_count}"
-                self.render_result(result)
-                try:
-                    data = await self.app.services.video_parser.parse_url(url)
-                    parsed = ParsedVideoResult.from_api_data(url, data)
-                    if parsed.item_id and not parsed.source_url:
-                        parsed.source_url = f"https://www.douyin.com/video/{parsed.item_id}"
-                    result.successes.append(parsed)
-                except Exception as exc:
-                    reason = str(exc) or exc.__class__.__name__
-                    assessment = classify_parser_failure(reason)
-                    result.failures.append(
-                        ParseFailure(
-                            source_url=url,
-                            reason=reason,
-                            category=assessment.category,
-                            retryable=assessment.retryable,
-                            user_action_required=assessment.user_action_required,
-                            next_step=assessment.detail,
+                if isinstance(event, ParsedVideoResult):
+                    if event.item_id and not event.source_url:
+                        event.source_url = f"https://www.douyin.com/video/{event.item_id}"
+                    result.successes.append(event)
+                elif isinstance(event, ParseFailure):
+                    result.failures.append(event)
+                elif isinstance(event, ParseDownloadEvent):
+                    if event.status == "queued":
+                        self.parse_progress_text = f"已加入下载队列：{event.item_id or event.source_url}"
+                    elif event.success:
+                        self.parse_progress_text = f"下载完成：{event.item_id or event.path}"
+                    else:
+                        self.parse_progress_text = f"下载失败：{event.item_id or event.reason}"
+                    if task_center is not None and task_id:
+                        task_center.progress(task_id, detail=self.parse_progress_text)
+                elif isinstance(event, ParseProgress):
+                    if event.message:
+                        self.parse_progress_text = event.message
+                    if task_center is not None and task_id:
+                        task_center.progress(
+                            task_id,
+                            completed=event.completed,
+                            success_count=event.success_count,
+                            failed_count=event.failed_count,
+                            detail=self.parse_progress_text,
                         )
-                    )
-                self.parse_progress_text = f"解析进度：{index}/{total}，成功 {result.success_count}，失败 {result.failed_count}"
-                if task_center is not None and task_id:
-                    task_center.progress(
-                        task_id,
-                        completed=index,
-                        success_count=result.success_count,
-                        failed_count=result.failed_count,
-                        detail=self.parse_progress_text,
-                    )
                 self.render_result(result)
             cancelled = self.parse_cancel_requested
             if task_center is not None and task_id:
@@ -208,12 +229,33 @@ class VideoParsePage(PageBase):
             self.parse_cancel_requested = False
             await self.set_loading(False)
 
+    async def _parse_text_stream_compat(self, text: str):
+        urls = self.extract_urls(text)
+        total = len(urls)
+        success_count = 0
+        failed_count = 0
+        for index, url in enumerate(urls, start=1):
+            try:
+                data = await self.app.services.video_parser.parse_url(url)
+                parsed = ParsedVideoResult.from_api_data(url, data)
+                success_count += 1
+                yield parsed
+            except Exception as exc:
+                reason = str(exc) or exc.__class__.__name__
+                assessment = classify_parser_failure(reason)
+                failed_count += 1
+                yield ParseFailure(
+                    source_url=url,
+                    reason=reason,
+                    category=assessment.category,
+                    retryable=assessment.retryable,
+                    user_action_required=assessment.user_action_required,
+                    next_step=assessment.detail,
+                )
+            yield ParseProgress(total=total, completed=index, success_count=success_count, failed_count=failed_count, message=f"解析进度：{index}/{total}，成功 {success_count}，失败 {failed_count}")
+
     def extract_urls(self, text: str) -> list[str]:
-        parser = getattr(self.app.services, "video_parser", None)
-        extractor = getattr(parser, "extract_urls", None)
-        if callable(extractor):
-            return list(dict.fromkeys(extractor(text)))
-        return list(dict.fromkeys(VideoParserService.extract_urls(text)))
+        return self.parse_workflow.extract_urls(text)
 
     async def cancel_parse(self) -> None:
         if not self.parse_in_progress:
@@ -532,59 +574,16 @@ class VideoParsePage(PageBase):
         await self.copy_text("\n".join(lines))
 
     def _history_path(self) -> Path:
-        return Path(self.app.run_path, "config", "parse_history.json")
+        return self.parse_workflow.history_path()
 
     def _load_parse_history(self) -> list[dict[str, Any]]:
-        store = getattr(getattr(self.app, "services", None), "sqlite_store", None)
-        if store is not None:
-            try:
-                if store.parse_history_count() > 0:
-                    return store.load_parse_history(limit=50)
-            except Exception as exc:
-                logger.debug(f"load parse history from sqlite failed: {exc}")
-        path = self._history_path()
-        if not path.is_file():
-            return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            records = data.get("records", data) if isinstance(data, dict) else data
-            history = [record for record in records if isinstance(record, dict)][:50]
-            if store is not None and history:
-                try:
-                    store.save_parse_history(history, max_records=50)
-                except Exception as exc:
-                    logger.debug(f"migrate parse history to sqlite failed: {exc}")
-            return history
-        except Exception:
-            return []
+        return self.parse_workflow.load_history()
 
     def _save_parse_history(self) -> None:
-        store = getattr(getattr(self.app, "services", None), "sqlite_store", None)
-        if store is not None:
-            try:
-                store.save_parse_history(self.parse_history[:50], max_records=50)
-            except Exception as exc:
-                logger.debug(f"save parse history to sqlite failed: {exc}")
-        try:
-            path = self._history_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"records": self.parse_history[:50]}, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as exc:
-            logger.debug(f"save parse history failed: {exc}")
+        self.parse_workflow.save_history(self.parse_history)
 
     def _append_parse_history(self, result: VideoParseBatchResult, cancelled: bool) -> None:
-        record = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "已取消" if cancelled else ("完成" if result.failed_count == 0 else "有失败"),
-            "total": result.total_count,
-            "success": result.success_count,
-            "failed": result.failed_count,
-            "work_links": [item.source_url for item in result.successes if item.source_url][:100],
-            "failed_links": [failure.source_url for failure in result.failures][:100],
-        }
-        self.parse_history.insert(0, record)
-        self.parse_history = self.parse_history[:50]
-        self._save_parse_history()
+        self.parse_history = self.parse_workflow.append_history(self.parse_history, result, cancelled)
 
     def show_parse_history_dialog(self) -> None:
         records = self.parse_history[:30]

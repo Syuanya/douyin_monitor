@@ -8,10 +8,11 @@ from typing import Any
 
 import flet as ft
 
+from ..core.application.service_container import DouyinMonitorServices
 from ..core.config.config_manager import ConfigManager
 from ..core.config.language_manager import LanguageManager
 from ..core.config.settings_config import SettingsConfig
-from ..core.content_monitor.douyin_content_monitor import DouyinContentMonitorManager
+from ..core.content_monitor.facade import DouyinContentMonitorManager
 from ..core.media.parsed_media_downloader import ParsedMediaDownloader
 from ..core.media.video_parser_service import ParsedVideoResult, VideoParserService
 from ..core.runtime.media_task_queue import MediaTaskQueue
@@ -44,74 +45,6 @@ def configure_page_fonts(page: ft.Page, run_path: str) -> None:
     page.fonts = {APP_FONT_NAME: APP_FONT_ASSET}
     page.theme = ft.Theme(font_family=APP_FONT_NAME)
     page.dark_theme = ft.Theme(font_family=APP_FONT_NAME)
-
-
-class DouyinMonitorServices:
-    """Small service container for the standalone Douyin monitor app."""
-
-    def __init__(self, run_path: str):
-        self.run_path = run_path
-        self.config_manager = ConfigManager(run_path)
-        self.sqlite_store = SQLiteStore(run_path)
-        self.sqlite_store.ensure_schema()
-        self.settings_config = SettingsConfig(self)
-        self.language_manager = LanguageManager.create_headless(self)
-        self.task_center = TaskCenter(
-            storage_path=os.path.join(run_path, "config", "task_records.json"),
-            sqlite_store=self.sqlite_store,
-        )
-        self.health_check_service = HealthCheckService(self)
-        self.download_recovery_service = DownloadRecoveryService(self.sqlite_store)
-        self.download_recovery_service.initialize_recovery_state()
-        self.media_task_queue = MediaTaskQueue(self.settings_config)
-        self.media_task_queue.task_center = self.task_center
-        parse_concurrency = self.settings_config.get_config_value("video_parse_concurrency", 4)
-        self.video_parser = VideoParserService(run_path, parse_concurrency=parse_concurrency)
-        self.parsed_media_downloader = ParsedMediaDownloader(self)
-        self.douyin_content_monitor = DouyinContentMonitorManager(self)
-        self.recording_manager = None
-        self.recording_enabled = False
-        self.process_manager = None
-        self.subprocess_start_up_info = None
-        self.tray_manager = None
-        self._ui_bridges: weakref.WeakSet[Any] = weakref.WeakSet()
-        self._bridges_lock = threading.Lock()
-
-    def register_ui_bridge(self, bridge: Any) -> None:
-        with self._bridges_lock:
-            self._ui_bridges.add(bridge)
-
-    def unregister_ui_bridge(self, bridge: Any) -> None:
-        with self._bridges_lock:
-            self._ui_bridges.discard(bridge)
-
-    def snapshot_bridges(self) -> list[Any]:
-        with self._bridges_lock:
-            return list(self._ui_bridges)
-
-    def broadcast_pubsub(self, topic: str, payload: Any) -> None:
-        for bridge in self.snapshot_bridges():
-            try:
-                bridge.schedule_pubsub(topic, payload)
-            except Exception as exc:
-                logger.debug(f"standalone douyin broadcast_pubsub failed: {exc}")
-
-    def broadcast_snack(self, text: str, **kw: Any) -> None:
-        for bridge in self.snapshot_bridges():
-            try:
-                bridge.schedule_snack(text, **kw)
-            except Exception as exc:
-                logger.debug(f"standalone douyin broadcast_snack failed: {exc}")
-
-    def broadcast_card_update(self, _recording: Any) -> None:
-        return
-
-    def broadcast_card_remove(self, _recordings: Any) -> None:
-        return
-
-    @staticmethod
-    def video_parser_result_from_api_data(source_url: str, data: dict[str, Any]) -> ParsedVideoResult:
-        return ParsedVideoResult.from_api_data(source_url, data)
 
 
 class OverlaySlot:

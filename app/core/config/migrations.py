@@ -31,6 +31,19 @@ def migrate_user_config(user_config: dict[str, Any], default_config: dict[str, A
             migrated["sqlite_json_mirror_enabled"] = True
             changed = True
 
+    if current < 5 <= target:
+        for key, value in {
+            "auto_update_enabled": False,
+            "auto_update_check_on_startup": False,
+            "auto_update_manifest_url": "",
+            "auto_update_channel": "stable",
+            "auto_update_silent_install": False,
+            "auto_update_install_kind": "installer",
+        }.items():
+            if key not in migrated:
+                migrated[key] = value
+                changed = True
+
     for key, value in default_config.items():
         if key not in migrated:
             migrated[key] = value

@@ -19,6 +19,15 @@ EXCLUDED_ANYWHERE_DIRS = {
     "__pycache__",
 }
 
+# Runtime output directories may be created below scripts/ or other helper
+# folders when tools are executed from source. Exclude these at any depth,
+# while keeping source packages such as app/core/diagnostics.
+EXCLUDED_RUNTIME_DIRS_ANYWHERE = {
+    "data",
+    "downloads",
+    "logs",
+}
+
 EXCLUDED_TOP_LEVEL_DIRS = {
     "cache",
     "build",
@@ -58,6 +67,8 @@ def should_include(path: Path) -> bool:
     parts = set(rel.parts)
     if parts & EXCLUDED_ANYWHERE_DIRS:
         return False
+    if parts & EXCLUDED_RUNTIME_DIRS_ANYWHERE:
+        return False
     if rel.parts and rel.parts[0] in EXCLUDED_TOP_LEVEL_DIRS:
         return False
     if path.name in ALWAYS_EXCLUDE_FILES:
@@ -96,6 +107,8 @@ def inspect_zip(zip_path: Path) -> list[str]:
             if len(item.parts) >= 2 and item.parts[0] == "config" and item.name in RUNTIME_CONFIG_FILES:
                 problems.append(name)
             if item.parts and item.parts[0] in {"data", "logs", "downloads", "diagnostics"}:
+                problems.append(name)
+            if set(item.parts) & EXCLUDED_RUNTIME_DIRS_ANYWHERE:
                 problems.append(name)
             if item.suffix == ".bak":
                 problems.append(name)

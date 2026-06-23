@@ -46,28 +46,35 @@ with open(f"{path}/config.yaml", "r", encoding="utf-8") as f:
 
 class DouyinWebCrawler:
 
-    async def get_douyin_headers(self):
+    async def get_douyin_headers(self, cookie: str | None = None):
         douyin_config = ((config.get("TokenManager") or {}).get("douyin") or {})
         headers_config = douyin_config.get("headers") or {}
         proxies_config = douyin_config.get("proxies") or {}
+        user_agent = headers_config.get("User-Agent") or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        cookie_value = (str(cookie).strip() if cookie is not None else str(headers_config.get("Cookie") or "").strip())
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": headers_config.get("Accept-Language") or "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "User-Agent": user_agent,
+            "Referer": headers_config.get("Referer") or "https://www.douyin.com/",
+        }
+        if cookie_value:
+            headers["Cookie"] = cookie_value
         kwargs = {
-            "headers": {
-                "Accept-Language": headers_config.get("Accept-Language") or "zh-CN,zh;q=0.9,en;q=0.8",
-                "User-Agent": headers_config.get("User-Agent") or (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-                ),
-                "Referer": headers_config.get("Referer") or "https://www.douyin.com/",
-                "Cookie": headers_config.get("Cookie") or "",
-            },
+            "headers": headers,
             "proxies": {"http://": proxies_config.get("http"), "https://": proxies_config.get("https")},
         }
         return kwargs
 
     "-------------------------------------------------------handler接口列表-------------------------------------------------------"
 
-    async def fetch_one_video(self, aweme_id: str):
-        kwargs = await self.get_douyin_headers()
+    async def fetch_one_video(self, aweme_id: str, cookie: str | None = None):
+        kwargs = await self.get_douyin_headers(cookie=cookie)
         base_crawler = BaseCrawler(proxies=kwargs["proxies"], crawler_headers=kwargs["headers"])
         async with base_crawler as crawler:
             params = PostDetail(aweme_id=aweme_id)
@@ -80,8 +87,8 @@ class DouyinWebCrawler:
             response = await crawler.fetch_get_json(endpoint)
         return response
 
-    async def fetch_user_post_videos(self, sec_user_id: str, max_cursor: int, count: int):
-        kwargs = await self.get_douyin_headers()
+    async def fetch_user_post_videos(self, sec_user_id: str, max_cursor: int, count: int, cookie: str | None = None):
+        kwargs = await self.get_douyin_headers(cookie=cookie)
         base_crawler = BaseCrawler(proxies=kwargs["proxies"], crawler_headers=kwargs["headers"])
         async with base_crawler as crawler:
             params = UserPost(sec_user_id=sec_user_id, max_cursor=max_cursor, count=count)
@@ -94,8 +101,8 @@ class DouyinWebCrawler:
             response = await crawler.fetch_get_json(endpoint)
         return response
 
-    async def fetch_user_like_videos(self, sec_user_id: str, max_cursor: int, count: int):
-        kwargs = await self.get_douyin_headers()
+    async def fetch_user_like_videos(self, sec_user_id: str, max_cursor: int, count: int, cookie: str | None = None):
+        kwargs = await self.get_douyin_headers(cookie=cookie)
         base_crawler = BaseCrawler(proxies=kwargs["proxies"], crawler_headers=kwargs["headers"])
         async with base_crawler as crawler:
             params = UserLike(sec_user_id=sec_user_id, max_cursor=max_cursor, count=count)

@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from .douyin_content_monitor import DouyinContentItem
+from .models import DouyinContentItem
 from ..media.image_urls import deduplicate_image_urls
 
 
@@ -23,14 +23,90 @@ class DouyinExternalApiClient:
     def _url(self, path: str) -> str:
         return urljoin(self.base_url + "/", path.lstrip("/"))
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-            response = await client.get(self._url(path), params=params or {})
+    async def _get(self, path: str, params: dict[str, Any] | None = None, *, headers: dict[str, str] | None = None, proxy: str | None = None) -> Any:
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=proxy) as client:
+            response = await client.get(self._url(path), params=params or {}, headers=headers)
             response.raise_for_status()
             payload = response.json()
         if isinstance(payload, dict) and "data" in payload:
             return payload.get("data")
         return payload
+
+
+    async def fetch_one_video_by_url(self, url: str, *, cookie: str = "", proxy: str | None = None) -> dict[str, Any]:
+        """Fetch one work using the external API and normalize the result.
+
+        Different deployments of Douyin_TikTok_Download_API expose slightly
+        different single-work endpoints.  This method tries the common shapes
+        in a safe order and returns the same dictionary schema consumed by
+        ParsedVideoResult.from_api_data.  No raw Cookie is persisted here; a
+        caller may pass it so a gateway can forward it upstream.
+        """
+
+        text = str(url or "").strip()
+        if not text:
+            raise ValueError("url is required")
+        aweme_id = self.extract_aweme_id(text)
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        if aweme_id:
+            candidates.append(("/api/douyin/web/fetch_one_video", {"aweme_id": aweme_id}))
+        candidates.extend(
+            [
+                ("/api/douyin/web/fetch_one_video", {"url": text}),
+                ("/api/douyin/web/fetch_one_video_from_url", {"url": text}),
+                ("/api/hybrid/video_data", {"url": text}),
+                ("/api/douyin/web/video_data", {"url": text}),
+            ]
+        )
+        headers = {"Cookie": cookie} if cookie else None
+        errors: list[str] = []
+        for path, params in candidates:
+            try:
+                data = await self._get(path, params=params, headers=headers, proxy=proxy)
+                normalized = self.normalize_single_video_payload(data, source_url=text)
+                if normalized.get("aweme_id"):
+                    return normalized
+                errors.append(f"{path}: empty aweme_id")
+            except Exception as exc:
+                errors.append(f"{path}: {exc}")
+        raise RuntimeError("外部解析器单作品接口不可用：" + "；".join(errors[:4]))
+
+    @staticmethod
+    def extract_aweme_id(url: str) -> str:
+        text = str(url or "")
+        for pattern in (r"/(?:video|note)/(\d{8,})", r"aweme_id=(\d{8,})", r"modal_id=(\d{8,})", r"/(\d{12,})(?:[/?#]|$)"):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+
+    @classmethod
+    def normalize_single_video_payload(cls, data: Any, *, source_url: str = "") -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        if "aweme_id" in data and ("video_data" in data or "image_data" in data):
+            return dict(data)
+        for key in ("aweme_detail", "awemeDetail", "aweme", "item", "video", "data"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                nested = cls.normalize_single_video_payload(value, source_url=source_url)
+                if nested.get("aweme_id"):
+                    return nested
+        item = cls.parse_aweme_item(data)
+        if item is None:
+            return {}
+        media_type = item.media_type or ("image" if item.image_urls else "video")
+        return {
+            "platform": "douyin",
+            "type": media_type,
+            "aweme_id": item.item_id,
+            "desc": item.title,
+            "video_data": {"nwm_video_url": "" if media_type == "image" else item.download_url, "wm_video_url": ""},
+            "image_data": {"no_watermark_image_list": list(item.image_urls or []), "watermark_image_list": []},
+            "author": {},
+            "share_url": item.share_url or source_url,
+            "raw_data": data,
+        }
 
     async def fetch_user_post_page(self, sec_user_id: str, max_cursor: int = 0, count: int = 20) -> dict[str, Any]:
         data = await self._get(

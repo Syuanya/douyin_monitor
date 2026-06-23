@@ -1,0 +1,6 @@
+# Optional dependencies for the Linux web console.
+# Install together with requirements.txt:
+#   pip install -r requirements.txt -r requirements-web.txt
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9

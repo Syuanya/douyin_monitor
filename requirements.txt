@@ -14,3 +14,4 @@ browser-cookie3>=0.19.1
 ua-parser>=0.18.0
 user-agents>=2.2.0
 tenacity>=9.0.0
+rich>=13.7.0

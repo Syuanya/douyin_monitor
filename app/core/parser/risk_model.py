@@ -22,6 +22,10 @@ _RISK_CONTROL_MARKERS = (
     "too many requests",
     "rate limit",
     "429",
+    "响应内容为空",
+    "空响应",
+    "empty response",
+    "http 200 空响应",
 )
 
 _AUTH_MARKERS = (

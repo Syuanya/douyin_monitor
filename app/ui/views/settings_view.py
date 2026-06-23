@@ -17,18 +17,15 @@ import flet as ft
 
 from ...core.media.file_naming import DEFAULT_FILENAME_TEMPLATE, format_media_filename
 from ...core.media.cookie_utils import cookie_looks_usable, parse_cookie_pool, sanitize_cookie_header
+from ...core.ui_services.settings_workflow import SettingsWorkflow
+from ...core.ui_services.performance_observability_service import PerformanceObservabilityService
 from ...utils.logger import logger
 from ..base_page import PageBase
 from ..components.common.safe_icons import icon
 
 
 class SettingsPage(PageBase):
-    DOWNLOAD_STRATEGIES = {
-        "conservative": {"label": "保守模式", "max_parallel_downloads": 1, "video_parse_concurrency": 2, "media_download_retry_count": 2},
-        "standard": {"label": "标准模式", "max_parallel_downloads": 2, "video_parse_concurrency": 4, "media_download_retry_count": 1},
-        "fast": {"label": "快速模式", "max_parallel_downloads": 4, "video_parse_concurrency": 6, "media_download_retry_count": 1},
-        "custom": {"label": "自定义", "max_parallel_downloads": None, "video_parse_concurrency": None, "media_download_retry_count": None},
-    }
+    DOWNLOAD_STRATEGIES = SettingsWorkflow.DOWNLOAD_STRATEGIES
 
     def __init__(self, app):
         super().__init__(app)
@@ -45,15 +42,44 @@ class SettingsPage(PageBase):
         self.max_parallel_downloads_field: ft.TextField | None = None
         self.parse_concurrency_field: ft.TextField | None = None
         self.media_retry_count_field: ft.TextField | None = None
+        self.monitor_batch_concurrency_field: ft.TextField | None = None
+        self.batch_parse_size_field: ft.TextField | None = None
+        self.batch_download_concurrency_field: ft.TextField | None = None
+        self.download_chunk_size_field: ft.TextField | None = None
+        self.gallery_image_concurrency_field: ft.TextField | None = None
+        self.cookie_cooldown_field: ft.TextField | None = None
+        self.incremental_pages_field: ft.TextField | None = None
+        self.segmented_parts_field: ft.TextField | None = None
+        self.segmented_min_size_field: ft.TextField | None = None
+        self.monitor_fast_switch: ft.Switch | None = None
+        self.global_rate_limiter_switch: ft.Switch | None = None
+        self.cookie_health_persistence_switch: ft.Switch | None = None
+        self.pipeline_download_switch: ft.Switch | None = None
+        self.segmented_download_switch: ft.Switch | None = None
+        self.auto_update_enabled_switch: ft.Switch | None = None
+        self.auto_update_startup_switch: ft.Switch | None = None
+        self.auto_update_silent_switch: ft.Switch | None = None
+        self.auto_update_manifest_url_field: ft.TextField | None = None
+        self.auto_update_channel_dropdown: ft.Dropdown | None = None
+        self.auto_update_install_kind_dropdown: ft.Dropdown | None = None
+        self.auto_update_status_text: ft.Text | None = None
         self.douyin_cookie_field: ft.TextField | None = None
         self.tiktok_cookie_field: ft.TextField | None = None
         self.proxy_enabled_switch: ft.Switch | None = None
         self.proxy_address_field: ft.TextField | None = None
         self.monitor_interval_field: ft.TextField | None = None
         self.settings_status_text: ft.Text | None = None
+        self.performance_observability_text: ft.Text | None = None
         self.cookie_test_status_text: ft.Text | None = None
         self.account_notify_switches: dict[str, ft.Switch] = {}
+        self.account_notify_expanded: bool = False
+        self.account_notify_list_container: ft.Container | None = None
+        self.account_notify_toggle_icon: ft.Icon | None = None
+        self.account_notify_toggle_text: ft.Text | None = None
+        self.account_notify_summary_text: ft.Text | None = None
         self.cookie_tester = None
+        self.workflow = SettingsWorkflow(app)
+        self.performance_observability = PerformanceObservabilityService(app)
         self.load_language()
 
     def load_language(self) -> None:
@@ -138,6 +164,27 @@ class SettingsPage(PageBase):
             width=180,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
+        self.monitor_batch_concurrency_field = ft.TextField(label="监控并发", value=str(user_config.get("monitor_batch_concurrency", settings.default_config.get("monitor_batch_concurrency", 2))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
+        self.batch_parse_size_field = ft.TextField(label="解析批大小", value=str(user_config.get("batch_parse_size", settings.default_config.get("batch_parse_size", 20))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
+        self.batch_download_concurrency_field = ft.TextField(label="批量下载并发", value=str(user_config.get("batch_download_concurrency", settings.default_config.get("batch_download_concurrency", 3))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
+        self.download_chunk_size_field = ft.TextField(label="下载块 KB", value=str(user_config.get("download_chunk_size_kb", settings.default_config.get("download_chunk_size_kb", 512))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
+        self.gallery_image_concurrency_field = ft.TextField(label="图集图片并发", value=str(user_config.get("gallery_image_concurrency", settings.default_config.get("gallery_image_concurrency", 4))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
+        self.cookie_cooldown_field = ft.TextField(label="Cookie 冷却秒", value=str(user_config.get("douyin_cookie_cooldown_seconds", settings.default_config.get("douyin_cookie_cooldown_seconds", 600))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
+        self.incremental_pages_field = ft.TextField(label="增量页数", value=str(user_config.get("douyin_monitor_incremental_pages", settings.default_config.get("douyin_monitor_incremental_pages", 3))), width=130, keyboard_type=ft.KeyboardType.NUMBER)
+        self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", settings.default_config.get("segmented_download_parts", 4))), width=110, keyboard_type=ft.KeyboardType.NUMBER)
+        self.segmented_min_size_field = ft.TextField(label="分片阈值 MB", value=str(user_config.get("segmented_download_min_size_mb", settings.default_config.get("segmented_download_min_size_mb", 50))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
+        self.monitor_fast_switch = ft.Switch(label="启用监控快速增量检测", value=bool(user_config.get("monitor_fast_check_enabled", True)))
+        self.global_rate_limiter_switch = ft.Switch(label="启用全局请求限速", value=bool(user_config.get("global_request_limiter_enabled", True)))
+        self.cookie_health_persistence_switch = ft.Switch(label="持久化 Cookie 健康度", value=bool(user_config.get("cookie_health_persistence_enabled", True)))
+        self.pipeline_download_switch = ft.Switch(label="批量解析成功后立即下载", value=bool(user_config.get("batch_parse_download_pipeline_enabled", False)))
+        self.segmented_download_switch = ft.Switch(label="启用大视频分片下载", value=bool(user_config.get("segmented_download_enabled", False)))
+        self.auto_update_enabled_switch = ft.Switch(label="启用自动更新检查", value=bool(user_config.get("auto_update_enabled", False)))
+        self.auto_update_startup_switch = ft.Switch(label="启动时检查更新", value=bool(user_config.get("auto_update_check_on_startup", False)))
+        self.auto_update_silent_switch = ft.Switch(label="安装器静默更新", value=bool(user_config.get("auto_update_silent_install", False)))
+        self.auto_update_manifest_url_field = ft.TextField(label="更新清单 URL", value=str(user_config.get("auto_update_manifest_url") or ""), hint_text="https://example.com/update_manifest.json", expand=True)
+        self.auto_update_channel_dropdown = ft.Dropdown(label="更新通道", value=str(user_config.get("auto_update_channel") or "stable"), width=150, options=[ft.dropdown.Option("stable", "稳定版"), ft.dropdown.Option("beta", "Beta"), ft.dropdown.Option("dev", "Dev")])
+        self.auto_update_install_kind_dropdown = ft.Dropdown(label="更新包类型", value=str(user_config.get("auto_update_install_kind") or "installer"), width=160, options=[ft.dropdown.Option("installer", "安装包"), ft.dropdown.Option("portable", "便携包")])
+        self.auto_update_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         cookies_config = getattr(settings, "cookies_config", {}) or {}
         self.douyin_cookie_field = ft.TextField(
             label=self._.get("douyin_cookie", "抖音 Cookie（可每行一个）"),
@@ -173,8 +220,13 @@ class SettingsPage(PageBase):
             keyboard_type=ft.KeyboardType.NUMBER,
         )
         self.settings_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.performance_observability_text = ft.Text(self.performance_observability.compact_text(), size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.cookie_test_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.account_notify_switches = {}
+        self.account_notify_list_container = None
+        self.account_notify_toggle_icon = None
+        self.account_notify_toggle_text = None
+        self.account_notify_summary_text = None
         self.content_area.controls.clear()
         self.content_area.controls.extend(
             [
@@ -285,6 +337,34 @@ class SettingsPage(PageBase):
                             tooltip=self._.get("cookie_sync_tip", "Cookie 会保存到本地配置，并同步给内置解析器。"),
                             icon_color=ft.Colors.ON_SURFACE_VARIANT,
                         ),
+                    ],
+                ),
+                self._section(
+                    "性能与批量",
+                    [
+                        ft.Text("根据账号数量、Cookie 质量和网络环境调整；过高并发会增加风控概率。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
+                        ft.Row([self.download_chunk_size_field, self.cookie_cooldown_field, self.incremental_pages_field], spacing=8, wrap=True),
+                        ft.Row([self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_health_persistence_switch], spacing=8, wrap=True),
+                        ft.Row([self.pipeline_download_switch, self.segmented_download_switch, self.segmented_parts_field, self.segmented_min_size_field], spacing=8, wrap=True),
+                        ft.Row([
+                            ft.OutlinedButton("刷新性能状态", icon=ft.Icons.QUERY_STATS, on_click=lambda e: self.refresh_performance_observability()),
+                            ft.OutlinedButton("清理 Cookie 健康记录", icon=ft.Icons.CLEANING_SERVICES, on_click=lambda e: self.run_async(self.clear_cookie_health_records())),
+                        ], spacing=8, wrap=True),
+                        self.performance_observability_text,
+                    ],
+                ),
+                self._section(
+                    "安装包与自动更新",
+                    [
+                        ft.Text("正式发布建议使用 Windows 安装包；自动更新通过远程 update_manifest.json 检查版本。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Row([self.auto_update_enabled_switch, self.auto_update_startup_switch, self.auto_update_silent_switch], spacing=8, wrap=True),
+                        ft.Row([self.auto_update_channel_dropdown, self.auto_update_install_kind_dropdown], spacing=8, wrap=True),
+                        self.auto_update_manifest_url_field,
+                        ft.Row([
+                            ft.OutlinedButton("检查更新", icon=ft.Icons.SYSTEM_UPDATE_ALT, on_click=lambda e: self.run_async(self.check_auto_update())),
+                        ], spacing=8, wrap=True),
+                        self.auto_update_status_text,
                     ],
                 ),
                 self._section(
@@ -415,6 +495,20 @@ class SettingsPage(PageBase):
             value=str(user_config.get("media_download_retry_count", 1)),
             keyboard_type=ft.KeyboardType.NUMBER,
         )
+        self.monitor_batch_concurrency_field = ft.TextField(label="监控并发", value=str(user_config.get("monitor_batch_concurrency", 2)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.batch_parse_size_field = ft.TextField(label="解析批大小", value=str(user_config.get("batch_parse_size", 20)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.batch_download_concurrency_field = ft.TextField(label="批量下载并发", value=str(user_config.get("batch_download_concurrency", 3)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.download_chunk_size_field = ft.TextField(label="下载块 KB", value=str(user_config.get("download_chunk_size_kb", 512)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.gallery_image_concurrency_field = ft.TextField(label="图集图片并发", value=str(user_config.get("gallery_image_concurrency", 4)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.cookie_cooldown_field = ft.TextField(label="Cookie 冷却秒", value=str(user_config.get("douyin_cookie_cooldown_seconds", 600)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.incremental_pages_field = ft.TextField(label="增量页数", value=str(user_config.get("douyin_monitor_incremental_pages", 3)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", 4)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.segmented_min_size_field = ft.TextField(label="分片阈值 MB", value=str(user_config.get("segmented_download_min_size_mb", 50)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.monitor_fast_switch = ft.Switch(label="启用监控快速增量检测", value=bool(user_config.get("monitor_fast_check_enabled", True)))
+        self.global_rate_limiter_switch = ft.Switch(label="启用全局请求限速", value=bool(user_config.get("global_request_limiter_enabled", True)))
+        self.cookie_health_persistence_switch = ft.Switch(label="持久化 Cookie 健康度", value=bool(user_config.get("cookie_health_persistence_enabled", True)))
+        self.pipeline_download_switch = ft.Switch(label="批量解析成功后立即下载", value=bool(user_config.get("batch_parse_download_pipeline_enabled", False)))
+        self.segmented_download_switch = ft.Switch(label="启用大视频分片下载", value=bool(user_config.get("segmented_download_enabled", False)))
         self.proxy_enabled_switch = ft.Switch(label="开启代理", value=bool(user_config.get("enable_proxy", False)))
         self.proxy_address_field = ft.TextField(label="代理地址", value=str(user_config.get("proxy_address") or ""))
         self.monitor_interval_field = ft.TextField(
@@ -423,11 +517,16 @@ class SettingsPage(PageBase):
             keyboard_type=ft.KeyboardType.NUMBER,
         )
         self.settings_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
+        self.performance_observability_text = ft.Text(self.performance_observability.compact_text(), size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.cookie_test_status_text = ft.Text("", size=12, selectable=True, color=ft.Colors.ON_SURFACE_VARIANT)
         self.language_dropdown = None
         self.filename_template_field = None
         self.download_strategy_dropdown = None
         self.account_notify_switches = {}
+        self.account_notify_list_container = None
+        self.account_notify_toggle_icon = None
+        self.account_notify_toggle_text = None
+        self.account_notify_summary_text = None
         self.content_area.controls.clear()
         self.content_area.controls.extend(
             [
@@ -458,6 +557,8 @@ class SettingsPage(PageBase):
                             spacing=8,
                             wrap=True,
                         ),
+                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
+                        ft.Row([self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_health_persistence_switch, self.pipeline_download_switch, self.segmented_download_switch], spacing=8, wrap=True),
                         self.monitor_interval_field,
                         self.proxy_enabled_switch,
                         self.proxy_address_field,
@@ -475,6 +576,21 @@ class SettingsPage(PageBase):
             ]
         )
         self.content_area.update()
+
+
+    def refresh_performance_observability(self) -> None:
+        if self.performance_observability_text is None:
+            return
+        self.performance_observability_text.value = self.performance_observability.compact_text()
+        try:
+            self.performance_observability_text.update()
+        except Exception:
+            pass
+
+    async def clear_cookie_health_records(self) -> None:
+        cleared = self.performance_observability.clear_cookie_health("douyin")
+        self.refresh_performance_observability()
+        await self.app.snack_bar.show_snack_bar(f"已清理 Cookie 健康记录 {cleared} 条", bgcolor=ft.Colors.PRIMARY)
 
     def _ensure_config_import_picker(self) -> None:
         if self.config_import_picker is not None:
@@ -662,14 +778,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         )
 
     def _format_cookie_pool_for_field(self, cookies_config: dict[str, Any], platform: str) -> str:
-        if platform != "douyin":
-            return str(cookies_config.get(f"{platform}_cookie") or "")
-        pool = parse_cookie_pool(cookies_config.get("douyin_cookie_pool") or [])
-        primary = str(cookies_config.get("douyin_cookie") or "")
-        for cookie in parse_cookie_pool(primary):
-            if cookie not in pool:
-                pool.insert(0, cookie)
-        return "\n".join(pool) if pool else primary
+        return self.workflow.format_cookie_pool_for_field(cookies_config, platform)
 
     def _cookie_chip(self, label: str, cookie: str) -> ft.Container:
         text = cookie.strip()
@@ -698,7 +807,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
     @staticmethod
     def _looks_like_cookie(cookie: str) -> bool:
-        return cookie_looks_usable(cookie)
+        return SettingsWorkflow.looks_like_cookie(cookie)
 
     def _section(self, title: str, controls: list[ft.Control]) -> ft.Container:
         return ft.Container(
@@ -716,13 +825,83 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         accounts = list(getattr(monitor, "accounts", []) or [])
         if not accounts:
             return [ft.Text(self._.get("no_accounts_for_notify", "暂无账号通知设置"), size=12, color=ft.Colors.ON_SURFACE_VARIANT)]
-        controls: list[ft.Control] = [ft.Text(self._.get("account_notify", "单账号通知开关"), theme_style=ft.TextThemeStyle.TITLE_SMALL)]
+
+        enabled_count = sum(1 for account in accounts if bool(getattr(account, "notify_enabled", True)))
+        disabled_count = max(len(accounts) - enabled_count, 0)
+        self.account_notify_summary_text = ft.Text(
+            f"{len(accounts)} 个账号 · 已开启 {enabled_count} · 已关闭 {disabled_count}",
+            size=12,
+            color=ft.Colors.ON_SURFACE_VARIANT,
+            selectable=True,
+        )
+        self.account_notify_toggle_icon = ft.Icon(
+            ft.Icons.EXPAND_LESS if self.account_notify_expanded else ft.Icons.EXPAND_MORE,
+            size=18,
+        )
+        self.account_notify_toggle_text = ft.Text("收起" if self.account_notify_expanded else "展开", size=12)
+
+        account_switches: list[ft.Control] = []
         for account in accounts:
             label = account.display_name or account.douyin_nickname or account.homepage_url or account.account_id
             switch = ft.Switch(label=label, value=bool(getattr(account, "notify_enabled", True)))
             self.account_notify_switches[account.account_id] = switch
-            controls.append(switch)
-        return controls
+            account_switches.append(switch)
+
+        self.account_notify_list_container = ft.Container(
+            content=ft.Column(account_switches, spacing=4, scroll=ft.ScrollMode.AUTO),
+            visible=self.account_notify_expanded,
+            height=360 if len(account_switches) > 8 else None,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+        )
+
+        header = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Column(
+                        controls=[
+                            ft.Text(self._.get("account_notify", "单账号通知开关"), theme_style=ft.TextThemeStyle.TITLE_SMALL),
+                            self.account_notify_summary_text,
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        content=ft.Row([self.account_notify_toggle_icon, self.account_notify_toggle_text], spacing=4, tight=True),
+                        tooltip="展开或收起单账号通知开关列表",
+                        on_click=self.toggle_account_notify_list,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+        )
+        return [header, self.account_notify_list_container]
+
+    def toggle_account_notify_list(self, _=None) -> None:
+        self.account_notify_expanded = not self.account_notify_expanded
+        if self.account_notify_list_container is not None:
+            self.account_notify_list_container.visible = self.account_notify_expanded
+            try:
+                self.account_notify_list_container.update()
+            except Exception:
+                pass
+        if self.account_notify_toggle_icon is not None:
+            self.account_notify_toggle_icon.name = ft.Icons.EXPAND_LESS if self.account_notify_expanded else ft.Icons.EXPAND_MORE
+            try:
+                self.account_notify_toggle_icon.update()
+            except Exception:
+                pass
+        if self.account_notify_toggle_text is not None:
+            self.account_notify_toggle_text.value = "收起" if self.account_notify_expanded else "展开"
+            try:
+                self.account_notify_toggle_text.update()
+            except Exception:
+                pass
 
     def reset_filename_template(self, _=None) -> None:
         if self.filename_template_field is not None:
@@ -744,11 +923,14 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
     def apply_download_strategy(self, _=None) -> None:
         preset = str((self.download_strategy_dropdown.value if self.download_strategy_dropdown else "") or "standard")
-        strategy = self.DOWNLOAD_STRATEGIES.get(preset, self.DOWNLOAD_STRATEGIES["standard"])
+        strategy = self.workflow.strategy_values(preset)
         field_map = {
             "max_parallel_downloads": self.max_parallel_downloads_field,
             "video_parse_concurrency": self.parse_concurrency_field,
             "media_download_retry_count": self.media_retry_count_field,
+            "monitor_batch_concurrency": self.monitor_batch_concurrency_field,
+            "batch_download_concurrency": self.batch_download_concurrency_field,
+            "gallery_image_concurrency": self.gallery_image_concurrency_field,
         }
         for key, field in field_map.items():
             value = strategy.get(key)
@@ -764,19 +946,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         if self.filename_preview_text is None:
             return
         template = str((self.filename_template_field.value if self.filename_template_field else "") or DEFAULT_FILENAME_TEMPLATE)
-        filename = format_media_filename(
-            template,
-            {
-                "platform": "douyin",
-                "author": "示例作者",
-                "item_id": "7123456789012345678",
-                "title": "示例作品标题",
-                "date": "20260616",
-            },
-            fallback="preview",
-        )
-        folder = self._storage_dir()
-        self.filename_preview_text.value = f"命名预览：{os.path.join(folder, filename)}.mp4"
+        self.filename_preview_text.value = self.workflow.filename_preview(template)
         try:
             self.filename_preview_text.update()
         except Exception:
@@ -954,11 +1124,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         await self.load()
 
     def _storage_dir(self) -> str:
-        value = (self.download_path_field.value if self.download_path_field else "") or self.selected_download_path or ""
-        value = value.strip()
-        if value:
-            return value
-        return os.path.join(self.app.run_path, "downloads", "douyin_content")
+        return self.workflow.storage_dir()
 
     async def open_storage_dir(self) -> None:
         path = self._storage_dir()
@@ -1012,6 +1178,47 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         except Exception as exc:
             logger.debug(f"settings feedback snackbar failed: {exc}")
 
+    async def check_auto_update(self) -> None:
+        service = getattr(self.app.services, "auto_update_service", None)
+        if service is None:
+            if self.auto_update_status_text is not None:
+                self.auto_update_status_text.value = "自动更新服务未初始化"
+                self.auto_update_status_text.color = ft.Colors.ERROR
+                self.auto_update_status_text.update()
+            return
+        manifest_url = str((self.auto_update_manifest_url_field.value if self.auto_update_manifest_url_field else "") or "").strip()
+        if not manifest_url:
+            if self.auto_update_status_text is not None:
+                self.auto_update_status_text.value = "请先填写更新清单 URL。"
+                self.auto_update_status_text.color = ft.Colors.ERROR
+                self.auto_update_status_text.update()
+            return
+        if self.auto_update_status_text is not None:
+            self.auto_update_status_text.value = "正在检查更新..."
+            self.auto_update_status_text.color = ft.Colors.PRIMARY
+            self.auto_update_status_text.update()
+        try:
+            info = await service.check_for_updates(manifest_url)
+            if info is None:
+                message = "未配置更新清单。"
+            elif info.available:
+                asset = info.best_asset(preferred_kind=str((self.auto_update_install_kind_dropdown.value if self.auto_update_install_kind_dropdown else "") or "installer"))
+                message = f"发现新版本 {info.latest_version}；当前版本 {info.current_version}。"
+                if asset is not None:
+                    message += f" 推荐下载：{asset.name}"
+            else:
+                message = f"当前已是最新版本：{info.current_version}"
+            if self.auto_update_status_text is not None:
+                self.auto_update_status_text.value = message
+                self.auto_update_status_text.color = ft.Colors.PRIMARY
+                self.auto_update_status_text.update()
+        except Exception as exc:
+            logger.exception(f"check auto update failed: {exc}")
+            if self.auto_update_status_text is not None:
+                self.auto_update_status_text.value = f"检查更新失败：{exc}"
+                self.auto_update_status_text.color = ft.Colors.ERROR
+                self.auto_update_status_text.update()
+
     async def test_cookie(self, platform: str) -> None:
         field = self.douyin_cookie_field if platform == "douyin" else self.tiktok_cookie_field
         raw_cookie = (field.value if field else "") or ""
@@ -1040,18 +1247,8 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         await self._show_feedback("cookie", reason, success=success, duration=5000)
 
     async def _default_cookie_test(self, platform: str, cookie: str) -> dict[str, Any]:
-        if not cookie:
-            return {"success": False, "reason": "Cookie 为空"}
-        url = "https://www.douyin.com/" if platform == "douyin" else "https://www.tiktok.com/"
-        cookie = sanitize_cookie_header(cookie)
-        headers = {"User-Agent": "Mozilla/5.0", "Cookie": cookie}
         proxy = (self.proxy_address_field.value or "").strip() if self.proxy_enabled_switch and self.proxy_enabled_switch.value else None
-        try:
-            async with httpx.AsyncClient(headers=headers, proxy=proxy, timeout=8, follow_redirects=True) as client:
-                response = await client.get(url)
-            return {"success": response.status_code < 400, "reason": f"{platform} Cookie 检测：HTTP {response.status_code}"}
-        except Exception as exc:
-            return {"success": False, "reason": f"{platform} Cookie 检测失败：{exc}"}
+        return await self.workflow.default_cookie_test(platform, cookie, proxy)
 
     async def save_settings(self) -> None:
         self._set_inline_status("settings", "正在保存设置...", ft.Colors.PRIMARY)
@@ -1080,6 +1277,34 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         except (TypeError, ValueError):
             media_retry_count = 1
         media_retry_count = max(0, min(5, media_retry_count))
+
+        def read_int_field(field: ft.TextField | None, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = int((field.value if field else "") or default)
+            except (TypeError, ValueError):
+                value = default
+            return max(minimum, min(maximum, value))
+
+        def read_bool_switch(switch: ft.Switch | None, default: bool) -> bool:
+            if switch is None:
+                return bool(default)
+            return bool(switch.value)
+
+        monitor_batch_concurrency = read_int_field(self.monitor_batch_concurrency_field, 2, 1, 16)
+        batch_parse_size = read_int_field(self.batch_parse_size_field, 20, 1, 500)
+        batch_download_concurrency = read_int_field(self.batch_download_concurrency_field, 3, 1, 32)
+        download_chunk_size_kb = read_int_field(self.download_chunk_size_field, 512, 64, 8192)
+        gallery_image_concurrency = read_int_field(self.gallery_image_concurrency_field, 4, 1, 32)
+        cookie_cooldown_seconds = read_int_field(self.cookie_cooldown_field, 600, 60, 3600)
+        incremental_pages = read_int_field(self.incremental_pages_field, 3, 1, 20)
+        segmented_parts = read_int_field(self.segmented_parts_field, 4, 2, 16)
+        segmented_min_size_mb = read_int_field(self.segmented_min_size_field, 50, 1, 4096)
+        monitor_fast_enabled = read_bool_switch(self.monitor_fast_switch, True)
+        global_limiter_enabled = read_bool_switch(self.global_rate_limiter_switch, True)
+        cookie_health_persistence_enabled = read_bool_switch(self.cookie_health_persistence_switch, True)
+        pipeline_download_enabled = read_bool_switch(self.pipeline_download_switch, False)
+        segmented_download_enabled = read_bool_switch(self.segmented_download_switch, False)
+
         download_strategy = str((self.download_strategy_dropdown.value if self.download_strategy_dropdown else "") or user_config.get("download_strategy_preset") or "standard")
         if download_strategy not in self.DOWNLOAD_STRATEGIES:
             download_strategy = "standard"
@@ -1091,6 +1316,27 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         user_config["media_queue_auto_tune"] = False
         user_config["video_parse_concurrency"] = parse_concurrency
         user_config["media_download_retry_count"] = media_retry_count
+        user_config["monitor_batch_concurrency"] = monitor_batch_concurrency
+        user_config["batch_parse_size"] = batch_parse_size
+        user_config["batch_download_concurrency"] = batch_download_concurrency
+        user_config["download_chunk_size_kb"] = download_chunk_size_kb
+        user_config["gallery_image_concurrency"] = gallery_image_concurrency
+        user_config["douyin_cookie_cooldown_seconds"] = cookie_cooldown_seconds
+        user_config["douyin_monitor_incremental_pages"] = incremental_pages
+        user_config["segmented_download_parts"] = segmented_parts
+        user_config["segmented_download_min_size_mb"] = segmented_min_size_mb
+        user_config["monitor_fast_check_enabled"] = monitor_fast_enabled
+        user_config["global_request_limiter_enabled"] = global_limiter_enabled
+        user_config["cookie_health_persistence_enabled"] = cookie_health_persistence_enabled
+        user_config["batch_parse_download_pipeline_enabled"] = pipeline_download_enabled
+        user_config["segmented_download_enabled"] = segmented_download_enabled
+        user_config["segmented_download_resume_enabled"] = True
+        user_config["auto_update_enabled"] = read_bool_switch(self.auto_update_enabled_switch, False)
+        user_config["auto_update_check_on_startup"] = read_bool_switch(self.auto_update_startup_switch, False)
+        user_config["auto_update_silent_install"] = read_bool_switch(self.auto_update_silent_switch, False)
+        user_config["auto_update_manifest_url"] = str((self.auto_update_manifest_url_field.value if self.auto_update_manifest_url_field else "") or "").strip()
+        user_config["auto_update_channel"] = str((self.auto_update_channel_dropdown.value if self.auto_update_channel_dropdown else "") or "stable")
+        user_config["auto_update_install_kind"] = str((self.auto_update_install_kind_dropdown.value if self.auto_update_install_kind_dropdown else "") or "installer")
         user_config["enable_proxy"] = bool(self.proxy_enabled_switch.value if self.proxy_enabled_switch else False)
         user_config["proxy_address"] = str((self.proxy_address_field.value if self.proxy_address_field else "") or "").strip()
         try:
@@ -1131,14 +1377,23 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             await self.app.services.config_manager.save_cookies_config(cookies_config)
         if hasattr(self.app.services.video_parser, "parse_concurrency"):
             self.app.services.video_parser.parse_concurrency = parse_concurrency
+        if hasattr(self.app.services.video_parser, "parse_batch_size"):
+            self.app.services.video_parser.parse_batch_size = batch_parse_size
+        if hasattr(self.app.services.video_parser, "batch_download_concurrency"):
+            self.app.services.video_parser.batch_download_concurrency = batch_download_concurrency
         cookie_sync_warnings: list[str] = []
-        if hasattr(self.app.services.video_parser, "update_cookie"):
-            for platform, cookie_value in (("douyin", douyin_cookie), ("tiktok", tiktok_cookie)):
-                try:
-                    self.app.services.video_parser.update_cookie(platform, cookie_value)
-                except Exception as exc:
-                    cookie_sync_warnings.append(f"{platform}: {exc}")
-                    logger.debug(f"sync {platform} cookie to parser failed: {exc}")
+        parser = getattr(self.app.services, "video_parser", None)
+        if parser is not None:
+            try:
+                if hasattr(parser, "configure_cookie_pool"):
+                    parser.configure_cookie_pool("douyin", douyin_cookie_pool)
+                    parser.configure_cookie_pool("tiktok", [tiktok_cookie] if tiktok_cookie else [])
+                elif hasattr(parser, "update_cookie"):
+                    parser.update_cookie("douyin", douyin_cookie)
+                    parser.update_cookie("tiktok", tiktok_cookie)
+            except Exception as exc:
+                cookie_sync_warnings.append(f"parser: {exc}")
+                logger.debug(f"sync cookies to parser failed: {exc}; " + "sync {platform} cookie to parser failed")
         monitor = getattr(self.app.services, "douyin_content_monitor", None)
         if monitor is not None:
             changed = False

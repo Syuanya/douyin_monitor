@@ -21,7 +21,13 @@ class CookiePoolTest(unittest.TestCase):
         self.assertIn("已识别 Cookie 池", text)
 
     def test_monitor_uses_cookie_pool_rotation_and_cooldown(self) -> None:
-        text = Path("app/core/content_monitor/douyin_content_monitor.py").read_text(encoding="utf-8")
+        text = "\n".join([
+            Path("app/core/content_monitor/douyin_content_monitor.py").read_text(encoding="utf-8"),
+            Path("app/core/content_monitor/facade.py").read_text(encoding="utf-8"),
+            Path("app/core/content_monitor/services/base_service.py").read_text(encoding="utf-8"),
+            Path("app/core/content_monitor/services/cookie_runtime.py").read_text(encoding="utf-8"),
+            Path("app/core/content_monitor/services/profile_sync_service.py").read_text(encoding="utf-8"),
+        ])
 
         self.assertIn("self._douyin_cookie_cursor = 0", text)
         self.assertIn("self._douyin_cookie_cooldowns", text)

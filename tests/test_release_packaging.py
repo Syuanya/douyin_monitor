@@ -50,6 +50,12 @@ class ReleasePackagingTest(unittest.TestCase):
             self.assertIn("scripts/version_check.py", names)
             self.assertIn("packaging/windows/douyin_monitor.spec", names)
             self.assertIn("packaging/windows/installer.iss", names)
+            self.assertIn("packaging/windows/apply_update.ps1", names)
+            self.assertIn("scripts/generate_update_manifest.py", names)
+            self.assertIn("scripts/sign_windows_artifacts.py", names)
+            self.assertIn("scripts/release_gate.py", names)
+            self.assertIn("app/core/update/updater_service.py", names)
+            self.assertIn("docs/INSTALLER_AUTO_UPDATE_SIGNING_CICD.md", names)
             self.assertIn("run_windows_checked.bat", names)
         finally:
             out_path.unlink(missing_ok=True)

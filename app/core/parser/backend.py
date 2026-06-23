@@ -79,7 +79,7 @@ class ParserBackend(Protocol):
     def capabilities(self) -> ParserCapabilities:
         ...
 
-    async def parse_url(self, url: str) -> dict[str, Any]:
+    async def parse_url(self, url: str, **kwargs: Any) -> dict[str, Any]:
         ...
 
     async def fetch_profile_contents(self, sec_user_id: str, max_pages: int = 20, count: int = 20) -> list[Any]:
@@ -114,7 +114,7 @@ class FallbackParserBackend:
         self.capabilities = merged
         return ParserHealth(any_ok, self.name, "；".join(details), merged, self.version)
 
-    async def parse_url(self, url: str) -> dict[str, Any]:
+    async def parse_url(self, url: str, **kwargs: Any) -> dict[str, Any]:
         return await self._call_first("parse_url", lambda caps: caps.parse_url or caps.single_url, url)
 
     async def fetch_profile_contents(self, sec_user_id: str, max_pages: int = 20, count: int = 20) -> list[Any]:

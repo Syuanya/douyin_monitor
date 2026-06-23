@@ -7,7 +7,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_MODULES = ["flet", "httpx", "yaml", "loguru", "PIL", "qrcode"]
+REQUIRED_MODULES = [
+    "flet",
+    "flet_video",
+    "httpx",
+    "yaml",
+    "loguru",
+    "PIL",
+    "qrcode",
+    "pydantic",
+    "gmssl",
+    "browser_cookie3",
+    "tenacity",
+    "rich",
+]
 
 
 def main() -> int:

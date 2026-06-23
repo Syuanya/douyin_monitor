@@ -50,7 +50,7 @@ class BaseCrawler:
             max_connections: int = 50,
             timeout: int = 10,
             max_tasks: int = 50,
-            crawler_headers: dict = {},
+            crawler_headers: dict | None = None,
     ):
         if isinstance(proxies, dict):
             self.proxies = proxies
@@ -128,7 +128,7 @@ class BaseCrawler:
         response = await self.get_fetch_data(endpoint)
         return self.parse_json(response)
 
-    async def fetch_post_json(self, endpoint: str, params: dict = {}, data=None) -> dict:
+    async def fetch_post_json(self, endpoint: str, params: dict | None = None, data=None) -> dict:
         """获取 JSON 数据 (Post JSON data)
 
         Args:
@@ -137,7 +137,7 @@ class BaseCrawler:
         Returns:
             dict: 解析后的JSON数据 (Parsed JSON data)
         """
-        response = await self.post_fetch_data(endpoint, params, data)
+        response = await self.post_fetch_data(endpoint, params or {}, data)
         return self.parse_json(response)
 
     def parse_json(self, response: Response) -> dict:
@@ -157,12 +157,18 @@ class BaseCrawler:
             try:
                 return response.json()
             except json.JSONDecodeError as e:
-                match = re.search(r"\{.*\}", response.text)
+                match = re.search(r"\{.*\}", response.text, flags=re.DOTALL)
+                if not match:
+                    logger.error("解析 {0} 接口 JSON 失败：响应中未找到 JSON 对象".format(self._safe_url_for_log(str(response.url))))
+                    raise APIResponseError("解析JSON数据失败：响应不是JSON") from e
                 try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError as e:
-                    logger.error("解析 {0} 接口 JSON 失败： {1}".format(self._safe_url_for_log(str(response.url)), e))
-                    raise APIResponseError("解析JSON数据失败")
+                    parsed = json.loads(match.group())
+                except json.JSONDecodeError as fallback_error:
+                    logger.error("解析 {0} 接口 JSON 失败： {1}".format(self._safe_url_for_log(str(response.url)), fallback_error))
+                    raise APIResponseError("解析JSON数据失败") from fallback_error
+                if not isinstance(parsed, dict):
+                    raise APIResponseError("解析JSON数据失败：响应不是对象")
+                return parsed
 
         else:
             if isinstance(response, Response):
@@ -189,10 +195,13 @@ class BaseCrawler:
                 response = await self.aclient.get(url, follow_redirects=True)
                 if not response.text.strip() or not response.content:
                     if attempt == self._max_retries - 1:
-                        logger.warning(self._empty_response_message(attempt + 1, response))
-                        raise APIRetryExhaustedError(
-                            "获取端点数据失败, 次数达到上限"
+                        message = (
+                            self._empty_response_message(attempt + 1, response)
+                            + "；连续收到 HTTP 200 空响应，通常表示 Cookie/登录态失效、请求过快触发风控，"
+                              "或 Web 签名参数已被平台规则变更。"
                         )
+                        logger.warning(message)
+                        raise APIRetryExhaustedError(message)
 
                     logger.debug(self._empty_response_message(attempt + 1, response))
 
@@ -214,7 +223,7 @@ class BaseCrawler:
                 logger.debug(e.display_error())
                 raise
 
-    async def post_fetch_data(self, url: str, params: dict = {}, data=None):
+    async def post_fetch_data(self, url: str, params: dict | None = None, data=None):
         """
         获取POST端点数据 (Get POST endpoint data)
 
@@ -235,10 +244,13 @@ class BaseCrawler:
                 )
                 if not response.text.strip() or not response.content:
                     if attempt == self._max_retries - 1:
-                        logger.warning(self._empty_response_message(attempt + 1, response))
-                        raise APIRetryExhaustedError(
-                            "获取端点数据失败, 次数达到上限"
+                        message = (
+                            self._empty_response_message(attempt + 1, response)
+                            + "；连续收到 HTTP 200 空响应，通常表示 Cookie/登录态失效、请求过快触发风控，"
+                              "或 Web 签名参数已被平台规则变更。"
                         )
+                        logger.warning(message)
+                        raise APIRetryExhaustedError(message)
 
                     logger.debug(self._empty_response_message(attempt + 1, response))
 
@@ -317,7 +329,8 @@ class BaseCrawler:
             raise APIResponseError(f"处理HTTP错误时遇到意外情况: {http_error}")
 
         if status_code == 302:
-            pass
+            location = response.headers.get("location", "") if response is not None else ""
+            raise APIResponseError(f"HTTP重定向未完成: {status_code}; Location: {self._safe_url_for_log(location)}")
         elif status_code == 404:
             raise APINotFoundError(f"HTTP Status Code {status_code}")
         elif status_code == 503:

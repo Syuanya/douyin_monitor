@@ -20,6 +20,8 @@ def work_status_chip(page: Any, item: Any) -> ft.Container:
     status = str(getattr(item, "status", "") or "")
     if status == "new":
         label, color = page._.get("new_work", "新作品"), ft.Colors.PRIMARY
+    elif status == "count_only":
+        label, color = "数量变化", ft.Colors.ORANGE
     elif status == "downloaded":
         label, color = "已下载", ft.Colors.GREEN
     elif status == "download_failed":
@@ -39,11 +41,30 @@ def create_inbox_item(page: Any, account: Any, item: Any) -> ft.Container:
     title = item.title or item.item_id
     owner = account.display_name or account.douyin_nickname or account.account_id
     gallery = is_gallery_item(item)
+    count_only = str(getattr(item, "status", "") or "") == "count_only"
     cover = (
         ft.Image(src=item.cover_url, width=260, height=150, fit=ft.BoxFit.COVER)
         if item.cover_url
-        else ft.Icon(ft.Icons.IMAGE_OUTLINED, color=ft.Colors.ON_SURFACE_VARIANT)
+        else ft.Icon(ft.Icons.NOTIFICATIONS_ACTIVE if count_only else ft.Icons.IMAGE_OUTLINED, color=ft.Colors.ON_SURFACE_VARIANT)
     )
+    detail_text = f"{owner}\nID: {item.item_id}\n首次发现：{item.first_seen_time or '-'}"
+    if count_only:
+        detail_text += "\n提示：只检测到作品数量变化，需重新同步获取具体作品。"
+    actions = [
+        ft.IconButton(icon=ft.Icons.PERSON_SEARCH, tooltip="查看该账号作品", on_click=lambda e, account_id=account.account_id: page.run_async(page.open_account_works(account_id)), icon_color=ft.Colors.PRIMARY),
+        ft.IconButton(icon=ft.Icons.OPEN_IN_NEW, tooltip="打开主页" if count_only else "打开作品", on_click=lambda e, url=item.share_url: page.run_async(page.open_url(url)), icon_color=ft.Colors.PRIMARY),
+        ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="复制主页链接" if count_only else "复制作品链接", on_click=lambda e, url=item.share_url: page.run_async(page.copy_text(url)), icon_color=ft.Colors.PRIMARY),
+    ]
+    if count_only:
+        actions.append(ft.IconButton(icon=ft.Icons.CLOUD_SYNC, tooltip="重新同步该账号作品", on_click=lambda e, account_id=account.account_id: page.run_async(page.sync_works(account_id)), icon_color=ft.Colors.PRIMARY))
+    else:
+        actions.extend(
+            [
+                ft.IconButton(icon=ft.Icons.IMAGE_SEARCH if gallery else ft.Icons.PLAY_CIRCLE_OUTLINE, tooltip="预览", on_click=lambda e, account_id=account.account_id, item_id=item.item_id, gallery=gallery: page.run_async(page.preview_inbox_item(account_id, item_id, gallery)), icon_color=ft.Colors.PRIMARY),
+                ft.IconButton(icon=ft.Icons.DOWNLOAD, tooltip="下载", on_click=lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.download_inbox_item(account_id, item_id)), icon_color=ft.Colors.PRIMARY),
+            ]
+        )
+    actions.append(ft.IconButton(icon=ft.Icons.DONE, tooltip="标记已处理", on_click=lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.mark_item_seen(account_id, item_id)), icon_color=ft.Colors.PRIMARY))
     return ft.Container(
         padding=8,
         border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
@@ -53,20 +74,15 @@ def create_inbox_item(page: Any, account: Any, item: Any) -> ft.Container:
             tight=True,
             controls=[
                 ft.Container(height=150, border_radius=6, clip_behavior=ft.ClipBehavior.HARD_EDGE, content=cover),
-                ft.Text(title, size=13, weight=ft.FontWeight.BOLD, selectable=True, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
-                ft.Text(f"{owner}\nID: {item.item_id}\n首次发现：{item.first_seen_time or '-'}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True),
                 ft.Row(
                     controls=[
-                        ft.IconButton(icon=ft.Icons.PERSON_SEARCH, tooltip="查看该账号作品", on_click=lambda e, account_id=account.account_id: page.run_async(page.open_account_works(account_id)), icon_color=ft.Colors.PRIMARY),
-                        ft.IconButton(icon=ft.Icons.OPEN_IN_NEW, tooltip="打开作品", on_click=lambda e, url=item.share_url: page.run_async(page.open_url(url)), icon_color=ft.Colors.PRIMARY),
-                        ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="复制作品链接", on_click=lambda e, url=item.share_url: page.run_async(page.copy_text(url)), icon_color=ft.Colors.PRIMARY),
-                        ft.IconButton(icon=ft.Icons.IMAGE_SEARCH if gallery else ft.Icons.PLAY_CIRCLE_OUTLINE, tooltip="预览", on_click=lambda e, account_id=account.account_id, item_id=item.item_id, gallery=gallery: page.run_async(page.preview_inbox_item(account_id, item_id, gallery)), icon_color=ft.Colors.PRIMARY),
-                        ft.IconButton(icon=ft.Icons.DOWNLOAD, tooltip="下载", on_click=lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.download_inbox_item(account_id, item_id)), icon_color=ft.Colors.PRIMARY),
-                        ft.IconButton(icon=ft.Icons.DONE, tooltip="标记已处理", on_click=lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.mark_item_seen(account_id, item_id)), icon_color=ft.Colors.PRIMARY),
+                        ft.Text(title, size=13, weight=ft.FontWeight.BOLD, selectable=True, expand=True, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                        work_status_chip(page, item),
                     ],
-                    spacing=3,
-                    wrap=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                ft.Text(detail_text, size=11, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True),
+                ft.Row(controls=actions, spacing=3, wrap=True),
             ],
         ),
     )

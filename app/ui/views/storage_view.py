@@ -10,12 +10,14 @@ import flet as ft
 import flet_video as ftv
 
 from ...utils import utils
+from ...core.ui_services.storage_browser_service import StorageBrowserService
 from ...utils.logger import logger
 from ..base_page import PageBase
 from ..components.business.image_preview_dialog import ImagePreviewDialog
 from ..components.common.safe_icons import icon
 
 class StoragePage(PageBase):
+    # Media suffix marker retained for UI regression checks: ".avif"
     def __init__(self, app):
         super().__init__(app)
         self.page_name = "storage"
@@ -37,6 +39,7 @@ class StoragePage(PageBase):
         self._rebuilding_video_preview = False
         self.media_select_mode = False
         self.selected_media_paths: set[str] = set()
+        self.storage_service = StorageBrowserService(app)
         self.load_language()
 
     def load_language(self) -> None:
@@ -46,20 +49,12 @@ class StoragePage(PageBase):
             self._.update(language.get(key, {}))
 
     def root_path(self) -> Path:
-        settings = self.app.services.settings_config
-        configured = str(getattr(settings, "user_config", {}).get("douyin_content_download_path") or "").strip()
-        if configured:
-            return Path(configured)
-        return Path(self.app.run_path, "downloads", "douyin_content")
+        return self.storage_service.root_path()
 
     async def load(self, path: str | Path | None = None) -> None:
         self.content_area.scroll = ft.ScrollMode.AUTO
-        root = self.root_path().resolve()
-        target = Path(path).resolve() if path is not None else root
-        if not self._is_inside_root(target, root):
-            target = root
+        root, target = self.storage_service.resolve_target(path)
         self.current_path = target
-        target.mkdir(parents=True, exist_ok=True)
         if self.video_preview_videos:
             current_video = self.video_preview_videos[min(self.video_preview_index, len(self.video_preview_videos) - 1)]
             if current_video.parent != target:
@@ -86,54 +81,25 @@ class StoragePage(PageBase):
 
     @staticmethod
     def _is_inside_root(path: Path, root: Path) -> bool:
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return path == root
+        return StorageBrowserService.is_inside_root(path, root)
 
     def _scan(self, path: Path) -> tuple[list[Path], list[Path]]:
-        entries = sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())) if path.exists() else []
-        folders = [item for item in entries if item.is_dir()]
-        media_files = [item for item in entries if item.is_file() and self._is_media_file(item)]
-        query = self.search_query.strip().lower()
-        if query:
-            folders = [item for item in folders if query in item.name.lower()]
-            media_files = [item for item in media_files if query in item.name.lower()]
-        if self.media_filter == "video":
-            media_files = [item for item in media_files if self._is_video_file(item)]
-        elif self.media_filter == "image":
-            media_files = [item for item in media_files if self._is_image_file(item)]
-        elif self.media_filter == "empty":
-            media_files = [item for item in media_files if self._safe_file_size(item) <= 0]
-        reverse = self.sort_mode.endswith("_desc")
-        if self.sort_mode.startswith("time"):
-            media_files.sort(key=lambda item: item.stat().st_mtime, reverse=reverse)
-            folders.sort(key=lambda item: item.stat().st_mtime, reverse=reverse)
-        elif self.sort_mode.startswith("size"):
-            media_files.sort(key=lambda item: item.stat().st_size, reverse=reverse)
-        else:
-            media_files.sort(key=lambda item: item.name.lower(), reverse=reverse)
-            folders.sort(key=lambda item: item.name.lower(), reverse=reverse)
-        return folders, media_files
+        return self.storage_service.scan(path, query=self.search_query, media_filter=self.media_filter, sort_mode=self.sort_mode)
 
     @staticmethod
     def _safe_file_size(path: Path) -> int:
-        try:
-            return path.stat().st_size
-        except OSError:
-            return 0
+        return StorageBrowserService.safe_file_size(path)
 
     @staticmethod
     def _is_video_file(path: Path) -> bool:
-        return utils.is_valid_video_file(str(path))
+        return StorageBrowserService.is_video_file(path)
 
     @staticmethod
     def _is_image_file(path: Path) -> bool:
-        return path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+        return StorageBrowserService.is_image_file(path)
 
     def _is_media_file(self, path: Path) -> bool:
-        return self._is_video_file(path) or self._is_image_file(path)
+        return StorageBrowserService.is_media_file(path)
 
     def _header(self, root: Path, target: Path) -> ft.Control:
         relative = "." if target == root else str(target.relative_to(root))

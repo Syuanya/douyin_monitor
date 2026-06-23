@@ -163,11 +163,25 @@ class ConfigManager:
         self._repair_invalid_json_config(self.cookies_config_path, cookies_config, reason="invalid_cookies")
         self._migrate_cookies_to_vault()
 
+
+    def _secure_cookie_storage_enabled(self) -> bool:
+        default_config = self.load_default_config() or {}
+        user_config = self.load_user_config() or {}
+        value = user_config.get("secure_cookie_storage_enabled", default_config.get("secure_cookie_storage_enabled", True))
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+        return bool(value)
+
     def _migrate_cookies_to_vault(self) -> None:
+        if not self._secure_cookie_storage_enabled():
+            return
         try:
             cookies = self._load_config(self.cookies_config_path, "An error occurred while loading cookies config")
             if cookies:
                 CookieVault(self.cookies_vault_path).save(cookies)
+                # Keep the compatibility file present but do not leave plaintext
+                # cookies behind when secure storage is enabled.
+                self._write_config_sync(self.cookies_config_path, {})
         except Exception as exc:
             logger.debug(f"Cookie vault migration skipped: {exc}")
 
@@ -215,12 +229,13 @@ class ConfigManager:
         return self._load_config(self.accounts_config_path, "An error occurred while loading accounts config")
 
     def load_cookies_config(self):
-        try:
-            vault_data = CookieVault(self.cookies_vault_path).load()
-            if vault_data:
-                return vault_data
-        except Exception as exc:
-            logger.debug(f"Cookie vault load skipped: {exc}")
+        if self._secure_cookie_storage_enabled():
+            try:
+                vault_data = CookieVault(self.cookies_vault_path).load()
+                if vault_data:
+                    return vault_data
+            except Exception as exc:
+                logger.debug(f"Cookie vault load skipped: {exc}")
         return self._load_config(self.cookies_config_path, "An error occurred while loading cookies config")
 
     def load_about_config(self):
@@ -300,13 +315,25 @@ class ConfigManager:
         )
 
     async def save_cookies_config(self, config):
-        try:
-            CookieVault(self.cookies_vault_path).save(config)
-        except Exception as exc:
-            logger.debug(f"Cookie vault save skipped: {exc}")
+        if self._secure_cookie_storage_enabled():
+            try:
+                CookieVault(self.cookies_vault_path).save(config)
+                mirror_config = {}
+            except Exception as exc:
+                logger.debug(f"Cookie vault save skipped: {exc}")
+                # Fall back to the plaintext compatibility file only when the
+                # local vault cannot be written, so the application remains
+                # usable and the failure is visible in logs.
+                mirror_config = config
+        else:
+            mirror_config = config
+            try:
+                Path(self.cookies_vault_path).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug(f"Cookie vault cleanup skipped: {exc}")
         await self._save_config(
             self.cookies_config_path,
-            config,
+            mirror_config,
             success_message="Cookies configuration saved.",
             error_message="An error occurred while saving cookies config",
         )

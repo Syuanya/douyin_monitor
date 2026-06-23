@@ -15,16 +15,10 @@ if ($LASTEXITCODE -ne 0) {
     & $Python -m pip install pyinstaller
 }
 
-Write-Host "[INFO] Building Windows executable..."
+Write-Host "[INFO] Building Windows executable with shared PyInstaller spec..."
 & $Python -m PyInstaller `
     --noconfirm `
     --clean `
-    --name DouyinMonitor `
-    --windowed `
-    --add-data "assets;assets" `
-    --add-data "locales;locales" `
-    --add-data "config/default_settings.json;config" `
-    --add-data "config/language.json;config" `
-    main.py
+    packaging/windows/douyin_monitor.spec
 
 Write-Host "[INFO] Build completed: dist/DouyinMonitor"

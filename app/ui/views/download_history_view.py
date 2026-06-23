@@ -7,6 +7,7 @@ from typing import Any
 
 import flet as ft
 
+from ...core.ui_services.download_history_service import DownloadHistoryService
 from ..base_page import PageBase
 
 
@@ -23,6 +24,7 @@ class DownloadHistoryPage(PageBase):
         self.page_name = "download_history"
         self.status_filter = "all"
         self.records_area: ft.Column | None = None
+        self.history_service = DownloadHistoryService(app)
 
     async def load(self) -> None:
         self.content_area.scroll = ft.ScrollMode.AUTO
@@ -136,45 +138,22 @@ class DownloadHistoryPage(PageBase):
         return ft.Column(controls=[*lines, ft.Row(actions, spacing=4, wrap=True), ft.Divider(height=8)], spacing=3)
 
     def _records(self, limit: int = 200) -> list[dict[str, Any]]:
-        store = getattr(self.app.services, "sqlite_store", None)
-        if store is None:
-            return []
-        return store.load_download_records(statuses=self._selected_statuses(), limit=limit)
+        return self.history_service.records(self.status_filter, limit=limit)
 
     def _counts(self) -> dict[str, int]:
-        store = getattr(self.app.services, "sqlite_store", None)
-        recovery = getattr(self.app.services, "download_recovery_service", None)
-        if store is None:
-            return {"total": 0, "recoverable": 0, "failed": 0, "completed": 0, "failed_cancelled": 0}
-        failed = store.download_record_count(["failed"])
-        cancelled = store.download_record_count(["cancelled"])
-        return {
-            "total": store.download_record_count(),
-            "recoverable": len(recovery.recoverable(limit=500)) if recovery is not None else 0,
-            "failed": failed,
-            "completed": store.download_record_count(["completed"]),
-            "failed_cancelled": failed + cancelled,
-        }
+        return self.history_service.counts()
 
     async def set_status_filter(self, mode: str) -> None:
         self.status_filter = str(mode or "all")
         await self.load()
 
     async def recover_one(self, record: dict[str, Any]) -> None:
-        recovery = getattr(self.app.services, "download_recovery_service", None)
-        if recovery is None:
-            await self.app.snack_bar.show_snack_bar("下载恢复服务不可用")
-            return
-        ok = await recovery.recover_one(record, headers=self._headers(), proxy=self._proxy_url(), resume_enabled=self._resume_enabled())
+        ok = await self.history_service.recover_one(record, headers=self._headers(), proxy=self._proxy_url(), resume_enabled=self._resume_enabled())
         await self.load()
         await self.app.snack_bar.show_snack_bar("下载恢复成功" if ok else "下载恢复失败")
 
     async def recover_all(self) -> None:
-        recovery = getattr(self.app.services, "download_recovery_service", None)
-        if recovery is None:
-            await self.app.snack_bar.show_snack_bar("下载恢复服务不可用")
-            return
-        result = await recovery.recover_all(headers=self._headers(), proxy=self._proxy_url(), resume_enabled=self._resume_enabled())
+        result = await self.history_service.recover_all(headers=self._headers(), proxy=self._proxy_url(), resume_enabled=self._resume_enabled())
         await self.load()
         failed = int(result.get("failed_count") or 0)
         await self.app.snack_bar.show_snack_bar(
@@ -184,14 +163,12 @@ class DownloadHistoryPage(PageBase):
         )
 
     async def clear_completed(self) -> None:
-        store = getattr(self.app.services, "sqlite_store", None)
-        deleted = store.delete_download_records(statuses=["completed"]) if store is not None else 0
+        deleted = self.history_service.clear_completed()
         await self.load()
         await self.app.snack_bar.show_snack_bar(f"已清理完成记录 {deleted} 条")
 
     async def clear_failed_cancelled(self) -> None:
-        store = getattr(self.app.services, "sqlite_store", None)
-        deleted = store.delete_download_records(statuses=["failed", "cancelled"]) if store is not None else 0
+        deleted = self.history_service.clear_failed_cancelled()
         await self.load()
         await self.app.snack_bar.show_snack_bar(f"已清理失败/取消记录 {deleted} 条")
 
@@ -200,29 +177,7 @@ class DownloadHistoryPage(PageBase):
         if not records:
             await self.app.snack_bar.show_snack_bar("暂无下载记录可导出")
             return
-        export_dir = os.path.join(self.app.run_path, "downloads", "download_history_exports")
-        os.makedirs(export_dir, exist_ok=True)
-        path = os.path.join(export_dir, f"download_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        with open(path, "w", encoding="utf-8-sig", newline="") as file:
-            writer = csv.writer(file)
-            writer.writerow(["ID", "类型", "标题", "状态", "已下载", "总大小", "错误", "URL", "保存路径", "创建时间", "更新时间", "完成时间"])
-            for record in records:
-                writer.writerow(
-                    [
-                        record.get("download_id") or "",
-                        record.get("kind") or "",
-                        record.get("label") or "",
-                        record.get("status") or "",
-                        record.get("bytes_downloaded") or 0,
-                        record.get("total_bytes") or 0,
-                        record.get("error") or "",
-                        record.get("url") or "",
-                        record.get("save_path") or "",
-                        record.get("created_at") or "",
-                        record.get("updated_at") or "",
-                        record.get("finished_at") or "",
-                    ]
-                )
+        path = self.history_service.export_csv(records)
         await self.app.snack_bar.show_snack_bar(f"已导出：{path}", duration=6000, show_close_icon=True)
 
     async def open_location(self, save_path: str) -> None:
@@ -230,17 +185,7 @@ class DownloadHistoryPage(PageBase):
         await self.open_path_or_url(target, success="已打开下载位置")
 
     def show_detail(self, record: dict[str, Any]) -> None:
-        text = "\n".join(
-            [
-                f"ID：{record.get('download_id') or '-'}",
-                f"状态：{record.get('status') or '-'}",
-                f"类型：{record.get('kind') or '-'}",
-                f"标题：{record.get('label') or '-'}",
-                f"保存路径：{record.get('save_path') or '-'}",
-                f"URL：{record.get('url') or '-'}",
-                f"错误：{record.get('error') or '-'}",
-            ]
-        )
+        text = "\n".join(self.history_service.detail_lines(record))
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("下载记录详情"),
@@ -250,13 +195,7 @@ class DownloadHistoryPage(PageBase):
         self.show_dialog(dialog)
 
     def _selected_statuses(self) -> list[str] | None:
-        return {
-            "recoverable": ["pending", "running", "recoverable", "failed", "cancelled"],
-            "running": ["running", "pending"],
-            "failed": ["failed"],
-            "completed": ["completed"],
-            "cancelled": ["cancelled"],
-        }.get(str(self.status_filter or "all"))
+        return self.history_service.selected_statuses(str(self.status_filter or "all"))
 
     def _headers(self) -> dict[str, str]:
         settings = getattr(self.app.services, "settings_config", None)
@@ -279,29 +218,14 @@ class DownloadHistoryPage(PageBase):
 
     @staticmethod
     def _progress_text(record: dict[str, Any]) -> str:
-        downloaded = int(record.get("bytes_downloaded") or 0)
-        total = int(record.get("total_bytes") or 0)
-        if total > 0:
-            return f"{_bytes_text(downloaded)}/{_bytes_text(total)}"
-        return _bytes_text(downloaded)
+        return DownloadHistoryService.progress_text(record)
 
     @staticmethod
     def _status_label(status: str) -> str:
-        return {
-            "all": "全部",
-            "completed": "完成",
-            "running": "运行中",
-            "pending": "等待中",
-            "recoverable": "可恢复",
-            "failed": "失败",
-            "cancelled": "已取消",
-        }.get(str(status or ""), str(status or "-"))
+        return DownloadHistoryService.status_label(status)
 
 
 def _bytes_text(value: int) -> str:
-    size = float(value or 0)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
-        size /= 1024
-    return f"{size:.1f} GB"
+    from ...core.ui_services.common import format_bytes
+
+    return format_bytes(value)
