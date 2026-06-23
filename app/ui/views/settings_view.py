@@ -52,7 +52,10 @@ class SettingsPage(PageBase):
         self.segmented_parts_field: ft.TextField | None = None
         self.segmented_min_size_field: ft.TextField | None = None
         self.monitor_fast_switch: ft.Switch | None = None
+        self.development_bypass_switch: ft.Switch | None = None
         self.global_rate_limiter_switch: ft.Switch | None = None
+        self.cookie_cooldown_enabled_switch: ft.Switch | None = None
+        self.risk_backoff_switch: ft.Switch | None = None
         self.cookie_health_persistence_switch: ft.Switch | None = None
         self.pipeline_download_switch: ft.Switch | None = None
         self.segmented_download_switch: ft.Switch | None = None
@@ -174,7 +177,14 @@ class SettingsPage(PageBase):
         self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", settings.default_config.get("segmented_download_parts", 4))), width=110, keyboard_type=ft.KeyboardType.NUMBER)
         self.segmented_min_size_field = ft.TextField(label="分片阈值 MB", value=str(user_config.get("segmented_download_min_size_mb", settings.default_config.get("segmented_download_min_size_mb", 50))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
         self.monitor_fast_switch = ft.Switch(label="启用监控快速增量检测", value=bool(user_config.get("monitor_fast_check_enabled", True)))
+        self.development_bypass_switch = ft.Switch(
+            label="开发模式：跳过冷却/限速/退避",
+            value=bool(user_config.get("development_bypass_risk_controls_enabled", False)),
+            tooltip="调试阶段可开启；开启后后端会跳过 Cookie 冷却、全局限速和风控退避。正式长期运行建议关闭。",
+        )
         self.global_rate_limiter_switch = ft.Switch(label="启用全局请求限速", value=bool(user_config.get("global_request_limiter_enabled", True)))
+        self.cookie_cooldown_enabled_switch = ft.Switch(label="启用 Cookie 失败冷却", value=bool(user_config.get("cookie_cooldown_enabled", True)))
+        self.risk_backoff_switch = ft.Switch(label="启用风控退避", value=bool(user_config.get("risk_backoff_enabled", True)))
         self.cookie_health_persistence_switch = ft.Switch(label="持久化 Cookie 健康度", value=bool(user_config.get("cookie_health_persistence_enabled", True)))
         self.pipeline_download_switch = ft.Switch(label="批量解析成功后立即下载", value=bool(user_config.get("batch_parse_download_pipeline_enabled", False)))
         self.segmented_download_switch = ft.Switch(label="启用大视频分片下载", value=bool(user_config.get("segmented_download_enabled", False)))
@@ -342,10 +352,19 @@ class SettingsPage(PageBase):
                 self._section(
                     "性能与批量",
                     [
-                        ft.Text("根据账号数量、Cookie 质量和网络环境调整；过高并发会增加风控概率。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ft.Text("根据账号数量、Cookie 质量和网络环境调整；过高并发会增加风控概率。开发阶段可临时跳过冷却、限速和退避。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                         ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
                         ft.Row([self.download_chunk_size_field, self.cookie_cooldown_field, self.incremental_pages_field], spacing=8, wrap=True),
-                        ft.Row([self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_health_persistence_switch], spacing=8, wrap=True),
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Row([self.development_bypass_switch], spacing=8, wrap=True),
+                                ft.Row([self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_cooldown_enabled_switch, self.risk_backoff_switch, self.cookie_health_persistence_switch], spacing=8, wrap=True),
+                                ft.Text("开发模式开启后会覆盖下方冷却/限速/退避开关；正式运行建议关闭开发模式，并按需开启限速和冷却。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ], spacing=4),
+                            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                            border_radius=8,
+                            padding=10,
+                        ),
                         ft.Row([self.pipeline_download_switch, self.segmented_download_switch, self.segmented_parts_field, self.segmented_min_size_field], spacing=8, wrap=True),
                         ft.Row([
                             ft.OutlinedButton("刷新性能状态", icon=ft.Icons.QUERY_STATS, on_click=lambda e: self.refresh_performance_observability()),
@@ -505,7 +524,14 @@ class SettingsPage(PageBase):
         self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", 4)), keyboard_type=ft.KeyboardType.NUMBER)
         self.segmented_min_size_field = ft.TextField(label="分片阈值 MB", value=str(user_config.get("segmented_download_min_size_mb", 50)), keyboard_type=ft.KeyboardType.NUMBER)
         self.monitor_fast_switch = ft.Switch(label="启用监控快速增量检测", value=bool(user_config.get("monitor_fast_check_enabled", True)))
+        self.development_bypass_switch = ft.Switch(
+            label="开发模式：跳过冷却/限速/退避",
+            value=bool(user_config.get("development_bypass_risk_controls_enabled", False)),
+            tooltip="调试阶段可开启；开启后后端会跳过 Cookie 冷却、全局限速和风控退避。正式长期运行建议关闭。",
+        )
         self.global_rate_limiter_switch = ft.Switch(label="启用全局请求限速", value=bool(user_config.get("global_request_limiter_enabled", True)))
+        self.cookie_cooldown_enabled_switch = ft.Switch(label="启用 Cookie 失败冷却", value=bool(user_config.get("cookie_cooldown_enabled", True)))
+        self.risk_backoff_switch = ft.Switch(label="启用风控退避", value=bool(user_config.get("risk_backoff_enabled", True)))
         self.cookie_health_persistence_switch = ft.Switch(label="持久化 Cookie 健康度", value=bool(user_config.get("cookie_health_persistence_enabled", True)))
         self.pipeline_download_switch = ft.Switch(label="批量解析成功后立即下载", value=bool(user_config.get("batch_parse_download_pipeline_enabled", False)))
         self.segmented_download_switch = ft.Switch(label="启用大视频分片下载", value=bool(user_config.get("segmented_download_enabled", False)))
@@ -558,7 +584,8 @@ class SettingsPage(PageBase):
                             wrap=True,
                         ),
                         ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
-                        ft.Row([self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_health_persistence_switch, self.pipeline_download_switch, self.segmented_download_switch], spacing=8, wrap=True),
+                        ft.Row([self.development_bypass_switch, self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_cooldown_enabled_switch, self.risk_backoff_switch, self.cookie_health_persistence_switch], spacing=8, wrap=True),
+                        ft.Row([self.pipeline_download_switch, self.segmented_download_switch], spacing=8, wrap=True),
                         self.monitor_interval_field,
                         self.proxy_enabled_switch,
                         self.proxy_address_field,
@@ -1300,7 +1327,10 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         segmented_parts = read_int_field(self.segmented_parts_field, 4, 2, 16)
         segmented_min_size_mb = read_int_field(self.segmented_min_size_field, 50, 1, 4096)
         monitor_fast_enabled = read_bool_switch(self.monitor_fast_switch, True)
+        development_bypass_enabled = read_bool_switch(self.development_bypass_switch, False)
         global_limiter_enabled = read_bool_switch(self.global_rate_limiter_switch, True)
+        cookie_cooldown_enabled = read_bool_switch(self.cookie_cooldown_enabled_switch, True)
+        risk_backoff_enabled = read_bool_switch(self.risk_backoff_switch, True)
         cookie_health_persistence_enabled = read_bool_switch(self.cookie_health_persistence_switch, True)
         pipeline_download_enabled = read_bool_switch(self.pipeline_download_switch, False)
         segmented_download_enabled = read_bool_switch(self.segmented_download_switch, False)
@@ -1326,7 +1356,10 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         user_config["segmented_download_parts"] = segmented_parts
         user_config["segmented_download_min_size_mb"] = segmented_min_size_mb
         user_config["monitor_fast_check_enabled"] = monitor_fast_enabled
+        user_config["development_bypass_risk_controls_enabled"] = development_bypass_enabled
         user_config["global_request_limiter_enabled"] = global_limiter_enabled
+        user_config["cookie_cooldown_enabled"] = cookie_cooldown_enabled
+        user_config["risk_backoff_enabled"] = risk_backoff_enabled
         user_config["cookie_health_persistence_enabled"] = cookie_health_persistence_enabled
         user_config["batch_parse_download_pipeline_enabled"] = pipeline_download_enabled
         user_config["segmented_download_enabled"] = segmented_download_enabled

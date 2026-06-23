@@ -318,7 +318,16 @@
     </section>
 
     <section id="risk" class="tab">
-      <div class="panel toolbar"><button id="refreshRiskBtn" class="primary">刷新网络与风控状态</button></div>
+      <div class="panel">
+        <h2>网络与风控控制</h2>
+        <p class="hint">开发调试阶段可临时关闭冷却、限速与退避；正式批量同步建议保持开启，避免高频请求触发平台风控。</p>
+        <div id="riskControls" class="settingsGrid"></div>
+        <div class="toolbar compact">
+          <button id="saveRiskControlsBtn" class="primary">保存控制开关</button>
+          <button id="refreshRiskBtn">刷新网络与风控状态</button>
+          <button id="clearRiskCookieHealthBtn" class="danger">清理 Cookie 冷却记录</button>
+        </div>
+      </div>
       <div id="riskStats" class="grid small"></div>
       <div class="grid two"><div class="panel"><h2>建议</h2><div id="riskSuggestions"></div></div><div class="panel"><h2>限速器</h2><div id="riskLimiter" class="kv"></div></div></div>
       <div id="riskAccountList" class="list"></div>

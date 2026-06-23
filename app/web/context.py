@@ -669,6 +669,14 @@ class WebRuntime:
         return {"success": not errors, "deleted": deleted, "errors": errors[:50]}
 
     def network_risk_summary(self) -> dict[str, Any]:
+        settings = getattr(self.services, "settings_config", None)
+        user_config = dict(getattr(settings, "user_config", {}) or {}) if settings else {}
+        controls = {
+            "development_bypass_risk_controls_enabled": bool(user_config.get("development_bypass_risk_controls_enabled", False)),
+            "global_request_limiter_enabled": bool(user_config.get("global_request_limiter_enabled", True)),
+            "cookie_cooldown_enabled": bool(user_config.get("cookie_cooldown_enabled", True)),
+            "risk_backoff_enabled": bool(user_config.get("risk_backoff_enabled", True)),
+        }
         cookie = self.observability.cookie_health_summary("douyin")
         limiter = self.observability.rate_limiter_summary()
         risk_accounts = []
@@ -679,13 +687,22 @@ class WebRuntime:
             if any(key in combined for key in ("风控", "空响应", "Cookie", "登录", "验证", "risk", "empty")):
                 risk_accounts.append({"account_id": account.account_id, "name": account.display_name or account.douyin_nickname, "status": status, "last_error": last_error})
         suggestions = []
-        if float(limiter.get("global_delay", 0) or 0) > 0:
-            suggestions.append("当前处于全局退避，建议等待冷却结束后再检测。")
-        if int(cookie.get("cooldown", 0) or 0) > 0:
-            suggestions.append("存在冷却中的 Cookie，建议降低并发或更换 Cookie。")
+        if controls["development_bypass_risk_controls_enabled"]:
+            suggestions.append("开发模式已开启：Cookie 冷却、全局限速和风控退避会被跳过。仅建议开发调试使用。")
+        else:
+            if float(limiter.get("global_delay", 0) or 0) > 0:
+                suggestions.append("当前处于全局退避，建议等待冷却结束后再检测。")
+            if int(cookie.get("cooldown", 0) or 0) > 0:
+                suggestions.append("存在冷却中的 Cookie，建议降低并发或更换 Cookie。")
+            if not controls["global_request_limiter_enabled"]:
+                suggestions.append("全局请求限速已关闭，批量同步可能更容易触发平台风控。")
+            if not controls["cookie_cooldown_enabled"]:
+                suggestions.append("Cookie 冷却已关闭，失败 Cookie 不会被自动暂避。")
+            if not controls["risk_backoff_enabled"]:
+                suggestions.append("风控退避已关闭，空响应/验证提示后不会主动降速。")
         if not suggestions:
             suggestions.append("当前未发现明显风控信号。批量同步仍建议分批执行。")
-        return {"cookie": cookie, "rate_limiter": limiter, "risk_accounts": risk_accounts, "suggestions": suggestions}
+        return {"cookie": cookie, "rate_limiter": limiter, "risk_accounts": risk_accounts, "suggestions": suggestions, "controls": controls}
 
     def notification_state(self) -> dict[str, Any]:
         settings = getattr(self.services, "settings_config", None)

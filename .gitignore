@@ -24,9 +24,11 @@ htmlcov/
 .env
 .env.*
 !.env.example
+!.env.web.example
 config/accounts.json
 config/cookies.json
 config/cookies.secure.json
+config/cookie_health.json
 config/douyin_content_monitor.json
 config/parse_history.json
 config/recordings.json
@@ -44,3 +46,8 @@ config/*.bak
 *.sqlite
 *.sqlite3
 *.sqlite3-*
+assets/fonts/
+*.otf
+*.ttf
+*.woff
+*.woff2

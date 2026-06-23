@@ -104,8 +104,16 @@ class PerformanceObservabilityService:
         try:
             snapshot = limiter.snapshot()
             scopes = dict(getattr(snapshot, "scopes", {}) or {})
+            settings = getattr(getattr(self.app, "services", None), "settings_config", None)
+            user_config = getattr(settings, "user_config", {}) or {}
+            bypass = bool(user_config.get("development_bypass_risk_controls_enabled", False))
+            global_enabled = bool(user_config.get("global_request_limiter_enabled", True))
+            risk_backoff_enabled = bool(user_config.get("risk_backoff_enabled", True))
             return {
                 "available": True,
+                "enabled": bool(global_enabled and not bypass),
+                "development_bypass": bypass,
+                "risk_backoff_enabled": bool(risk_backoff_enabled and not bypass),
                 "global_delay": round(float(getattr(snapshot, "global_delay", 0.0) or 0.0), 2),
                 "wait_count": int(getattr(snapshot, "wait_count", 0) or 0),
                 "failure_count": int(getattr(snapshot, "failure_count", 0) or 0),

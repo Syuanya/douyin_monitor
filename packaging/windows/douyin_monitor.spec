@@ -10,7 +10,6 @@ datas = [
     (str(ROOT / "locales"), "locales"),
     (str(ROOT / "config" / "default_settings.json"), "config"),
     (str(ROOT / "config" / "language.json"), "config"),
-    (str(ROOT / "config.yaml"), "."),
     (str(ROOT / "crawlers" / "douyin" / "web" / "config.yaml"), "crawlers/douyin/web"),
     (str(ROOT / "crawlers" / "tiktok" / "web" / "config.yaml"), "crawlers/tiktok/web"),
     (str(ROOT / "crawlers" / "tiktok" / "app" / "config.yaml"), "crawlers/tiktok/app"),

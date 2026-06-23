@@ -287,7 +287,18 @@ class DouyinMonitorStandaloneApp:
             self.current_page = self.douyin_content
         self.current_page_name = self.current_page.page_name
         self.refresh_nav()
-        await self.current_page.load()
+        try:
+            await self.current_page.load()
+        except Exception as exc:
+            logger.exception(f"Failed to load page {page_name}: {exc}")
+            self.content_area.controls.clear()
+            self.content_area.controls.extend(
+                [
+                    ft.Text("页面加载失败", theme_style=ft.TextThemeStyle.TITLE_LARGE),
+                    ft.Text(str(exc), color=ft.Colors.ERROR, selectable=True),
+                    ft.Text("请复制这段错误信息反馈，或先切换到其他页面继续使用。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                ]
+            )
         self.shell_area.update()
 
 

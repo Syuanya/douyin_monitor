@@ -1,0 +1,101 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.9.9"
+        required: false
+      prerelease:
+        description: "Create prerelease"
+        type: boolean
+        default: false
+      sign:
+        description: "Attempt Windows code signing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    env:
+      UPDATE_CHANNEL: stable
+      WINDOWS_SIGN_CERT_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_PFX_BASE64 }}
+      WINDOWS_SIGN_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+      WINDOWS_SIGN_CERT_SUBJECT: ${{ secrets.WINDOWS_SIGN_CERT_SUBJECT }}
+      WINDOWS_SIGN_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGN_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          if ('${{ github.event.inputs.version }}') {
+            $version='${{ github.event.inputs.version }}'
+          } elseif ('${{ github.ref_type }}' -eq 'tag') {
+            $version='${{ github.ref_name }}'.TrimStart('v')
+          } else {
+            $version=(Get-Content VERSION -Raw).Trim().TrimStart('v')
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Set-Content -Path VERSION -Value $version -NoNewline
+          (Get-Content app/core/version.py) -replace 'APP_VERSION = ".*"', "APP_VERSION = `"$version`"" | Set-Content app/core/version.py
+      - name: Build signed Windows release artifacts
+        shell: pwsh
+        env:
+          UPDATE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}
+        run: |
+          $args = @('--installer','--portable-zip','--manifest','--skip-tests')
+          if ('${{ github.event.inputs.sign }}' -ne 'false') { $args += '--sign' }
+          python scripts/build_windows_release.py @args
+      - name: Verify release package structure
+        shell: pwsh
+        run: |
+          $zip = (Get-ChildItem dist -Filter '*portable.zip' | Select-Object -First 1).FullName
+          python scripts/verify_windows_package.py --release-zip $zip --run-build
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-monitor-windows-${{ steps.version.outputs.version }}
+          path: |
+            dist/DouyinMonitor-*-windows-x64-portable.zip
+            dist/installer/*.exe
+            dist/update_manifest.json
+          if-no-files-found: error
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v${{ steps.version.outputs.version }}"
+          $files = @()
+          $files += Get-ChildItem dist -Filter '*portable.zip' | ForEach-Object { $_.FullName }
+          $files += Get-ChildItem dist/installer -Filter '*.exe' | ForEach-Object { $_.FullName }
+          $files += Join-Path $PWD 'dist/update_manifest.json'
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            if ('${{ github.event.inputs.prerelease }}' -eq 'true') {
+              gh release create $tag @files --title "Douyin Monitor $tag" --notes-file CHANGELOG.md --prerelease
+            } else {
+              gh release create $tag @files --title "Douyin Monitor $tag" --notes-file CHANGELOG.md
+            }
+          } else {
+            gh release upload $tag @files --clobber
+          }

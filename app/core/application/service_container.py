@@ -56,6 +56,7 @@ class DouyinMonitorServices:
         parse_batch_size = self.settings_config.get_config_value("batch_parse_size", 20)
         batch_download_concurrency = self.settings_config.get_config_value("batch_download_concurrency", 3)
         self.video_parser = VideoParserService(run_path, parse_concurrency=parse_concurrency)
+        self.video_parser.settings_config = self.settings_config
         self.video_parser.cookie_health_store = self.cookie_health_store
         self.video_parser.request_limiter = self.douyin_request_limiter
         self.video_parser.parse_batch_size = max(1, int(parse_batch_size or 20))

@@ -66,8 +66,11 @@ class DouyinRequestLimiter:
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _bypass_enabled(self) -> bool:
+        return self._config_bool("development_bypass_risk_controls_enabled", False)
+
     def _interval_for_scope(self, scope: str) -> float:
-        if not self._config_bool("global_request_limiter_enabled", True):
+        if self._bypass_enabled() or not self._config_bool("global_request_limiter_enabled", True):
             return 0.0
         scope = str(scope or "general")
         if scope.startswith("cookie:"):
@@ -82,7 +85,7 @@ class DouyinRequestLimiter:
         return 60.0 / rpm
 
     async def wait(self, *scopes: str) -> None:
-        if not self._config_bool("global_request_limiter_enabled", True):
+        if self._bypass_enabled() or not self._config_bool("global_request_limiter_enabled", True):
             return
         normalized = [str(scope or "").strip() for scope in scopes if str(scope or "").strip()]
         normalized.append("global")
@@ -107,6 +110,8 @@ class DouyinRequestLimiter:
             self._global_backoff_seconds = max(0.0, self._global_backoff_seconds * 0.7)
 
     def record_failure(self, reason: str = "") -> None:
+        if self._bypass_enabled() or not self._config_bool("risk_backoff_enabled", True):
+            return
         lowered = str(reason or "").lower()
         risk = any(token in lowered for token in ("empty", "空响应", "风控", "captcha", "verify", "429", "418"))
         if not risk:
@@ -118,9 +123,13 @@ class DouyinRequestLimiter:
         self._global_backoff_until = max(self._global_backoff_until, time.monotonic() + self._global_backoff_seconds)
 
     def snapshot(self) -> RateLimitSnapshot:
+        if self._bypass_enabled() or not self._config_bool("global_request_limiter_enabled", True):
+            scopes = {key: 0.0 for key in self._limiters}
+        else:
+            scopes = {key: limiter.interval_seconds for key, limiter in self._limiters.items()}
         return RateLimitSnapshot(
-            global_delay=max(0.0, self._global_backoff_until - time.monotonic()),
-            scopes={key: limiter.interval_seconds for key, limiter in self._limiters.items()},
+            global_delay=0.0 if self._bypass_enabled() or not self._config_bool("risk_backoff_enabled", True) else max(0.0, self._global_backoff_until - time.monotonic()),
+            scopes=scopes,
             wait_count=self._wait_count,
             failure_count=self._failure_count,
         )

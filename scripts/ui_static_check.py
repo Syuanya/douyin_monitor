@@ -21,6 +21,34 @@ REQUIRED_PAGES = {
 }
 
 
+
+
+def incompatible_button_text_keywords(path: Path) -> list[str]:
+    """Return locations of Flet button constructors using text= keyword.
+
+    The Windows desktop build can run with a Flet version whose button
+    constructors accept the button label only as the first positional argument.
+    Using text= compiles but crashes at runtime, blanking the page.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError as exc:
+        return [f"{path.relative_to(ROOT)}:{exc.lineno}: syntax error while scanning Flet buttons"]
+    bad: list[str] = []
+    button_names = {"OutlinedButton", "ElevatedButton", "TextButton", "FilledButton"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr not in button_names:
+            continue
+        value = func.value
+        if not (isinstance(value, ast.Name) and value.id == "ft"):
+            continue
+        if any(keyword.arg == "text" for keyword in node.keywords):
+            bad.append(f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', '?')}: ft.{func.attr} uses unsupported text= keyword")
+    return bad
+
 def class_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
@@ -28,6 +56,8 @@ def class_names(path: Path) -> set[str]:
 
 def main() -> int:
     errors: list[str] = []
+    for ui_path in list((ROOT / "app" / "ui" / "views").glob("*.py")) + list((ROOT / "app" / "ui" / "components").rglob("*.py")):
+        errors.extend(incompatible_button_text_keywords(ui_path))
     for class_name, relative in REQUIRED_PAGES.items():
         path = ROOT / relative
         if not path.exists():

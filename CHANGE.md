@@ -1,15 +1,13 @@
-# Change Log
+# CHANGE
 
-This repository keeps the detailed release history in [`CHANGELOG.md`](CHANGELOG.md).
+当前版本：`1.0.2`。
 
-Latest release: `1.0.0` - Web Windows-style / Netdisk Storage.
+本版本重点：
 
-Highlights:
+- 修复 Win 端问题中心灰块/空白问题。
+- 问题中心改为保守控件布局，并增加页面加载异常兜底。
+- 保留开发模式、限速、Cookie 冷却、风控退避开关。
+- Web 端保留 Windows 风格主导航和网盘式存储界面。
+- GitHub 源码包已清理缓存、日志、运行数据、字体二进制文件和无关根级 API 配置文件。
 
-- Web pages were reorganized to match the Windows desktop workflow.
-- Video parsing results are now concise and include per-item download buttons.
-- Storage was rebuilt as a netdisk-style file manager with grid/list views.
-- Downloaded videos and images can be previewed directly from the storage page.
-- Folder navigation, breadcrumb navigation, and “back to parent directory” were fixed.
-- SSE time parsing was fixed for string timestamps.
-- Docker/Web deployment documentation was refreshed for GitHub publishing.
+完整变更请查看 `CHANGELOG.md`。

@@ -49,6 +49,7 @@ RUNTIME_CONFIG_FILES = {
     "accounts.json",
     "cookies.json",
     "cookies.secure.json",
+    "cookie_health.json",
     "douyin_content_monitor.json",
     "parse_history.json",
     "recordings.json",

@@ -690,7 +690,41 @@ async function loadLogTail(name){ const lines=Number($('logLines').value||200); 
 async function searchLogs(){ const q=$('logQuery').value, level=$('logLevel').value, lines=Number($('logLines').value||500); const data=await api(`/api/logs/search?q=${encodeURIComponent(q)}&level=${encodeURIComponent(level)}&lines=${lines}`); $('logSearchList').innerHTML=(data.matches||[]).map(m=>`<div class="miniItem"><div><strong>${escapeHtml(m.file)}:${m.line}</strong><p class="hint">${escapeHtml(m.content)}</p></div></div>`).join('') || '<div class="panel">没有匹配日志。</div>'; }
 async function clearLogs(name=''){ if(!confirm(name?'确认清空该日志？':'确认清空全部日志？')) return; const r=await api(`/api/logs/clear?name=${encodeURIComponent(name)}`,{method:'POST'}); toast(`已清空 ${r.cleared||0} 个日志`); await loadLogs(); $('logContent').textContent=''; }
 
-async function loadRisk(){ try{ const data=await api('/api/network-risk'); const c=data.cookie||{}, l=data.rate_limiter||{}; $('riskStats').innerHTML=[stat('Cookie冷却', c.cooldown||0), stat('Cookie降级', c.degraded||0), stat('全局退避秒', l.global_delay||0), stat('风险账号', (data.risk_accounts||[]).length)].join(''); $('riskSuggestions').innerHTML=(data.suggestions||[]).map(x=>`<p>${escapeHtml(x)}</p>`).join(''); $('riskLimiter').innerHTML=renderKv(l); $('riskAccountList').innerHTML=(data.risk_accounts||[]).map(a=>`<div class="card"><div class="card-title"><strong>${escapeHtml(a.name||a.account_id)}</strong>${badge(a.status||'风险','warn')}</div><p class="hint danger">${escapeHtml(a.last_error||'')}</p></div>`).join('') || '<div class="panel">暂无明显风险账号。</div>'; }catch(e){toast(`加载风控状态失败：${e.message}`);} }
+const riskControlFields = [
+  ['development_bypass_risk_controls_enabled','开发模式：跳过冷却/限速/退避'],
+  ['global_request_limiter_enabled','启用全局请求限速'],
+  ['cookie_cooldown_enabled','启用 Cookie 失败冷却'],
+  ['risk_backoff_enabled','启用风控退避']
+];
+async function loadRisk(){
+  try{
+    const data=await api('/api/network-risk');
+    const c=data.cookie||{}, l=data.rate_limiter||{}, controls=data.controls||{};
+    $('riskStats').innerHTML=[stat('Cookie冷却', c.cooldown||0), stat('Cookie降级', c.degraded||0), stat('限速状态', l.enabled===false?'关闭':'开启'), stat('风险账号', (data.risk_accounts||[]).length)].join('');
+    if($('riskControls')) $('riskControls').innerHTML=riskControlFields.map(([key,label])=>`<label><span>${escapeHtml(label)}</span><input data-risk-control="${key}" type="checkbox" ${controls[key] ? 'checked' : ''}/></label>`).join('');
+    $('riskSuggestions').innerHTML=(data.suggestions||[]).map(x=>`<p>${escapeHtml(x)}</p>`).join('');
+    $('riskLimiter').innerHTML=renderKv(l);
+    $('riskAccountList').innerHTML=(data.risk_accounts||[]).map(a=>`<div class="card"><div class="card-title"><strong>${escapeHtml(a.name||a.account_id)}</strong>${badge(a.status||'风险','warn')}</div><p class="hint danger">${escapeHtml(a.last_error||'')}</p></div>`).join('') || '<div class="panel">暂无明显风险账号。</div>';
+  }catch(e){toast(`加载风控状态失败：${e.message}`);}
+}
+async function saveRiskControls(){
+  const values={};
+  document.querySelectorAll('[data-risk-control]').forEach(el=>{ values[el.dataset.riskControl]=el.checked; });
+  if(values.development_bypass_risk_controls_enabled){
+    values.global_request_limiter_enabled=false;
+    values.cookie_cooldown_enabled=false;
+    values.risk_backoff_enabled=false;
+  }
+  await api('/api/settings',{method:'PATCH', body:JSON.stringify({values})});
+  toast(values.development_bypass_risk_controls_enabled ? '已开启开发模式：冷却/限速/退避已跳过' : '风控控制开关已保存');
+  await loadRisk();
+}
+async function clearRiskCookieHealth(){
+  if(!confirm('确认清理 Cookie 健康/冷却记录？不会删除 Cookie 原文。')) return;
+  await api('/api/cookies/clear-health',{method:'POST'});
+  toast('Cookie 冷却记录已清理');
+  await loadRisk();
+}
 
 async function loadNotifications(){ try{ const data=await api('/api/notifications'); const g=data.global||{}; const channelFields=['webhook_url','telegram_bot_token','telegram_chat_id','bark_url','bark_key','serverchan_sendkey','wecom_webhook_url']; $('notificationGlobal').innerHTML=['notification_enabled','notify_on_new_work','notify_on_download_complete','notify_on_download_failed'].map(k=>`<label><span>${escapeHtml(k)}</span><input data-notify-global="${k}" type="checkbox" ${g[k]?'checked':''}></label>`).join('') + channelFields.map(k=>`<label><span>${escapeHtml(k)}</span><input data-notify-global="${k}" value="${escapeHtml(g[k]||'')}"></label>`).join(''); $('notificationAccounts').innerHTML=(data.accounts||[]).map(a=>`<div class="card"><label class="check strong"><input data-notify-account="${a.account_id}" type="checkbox" ${a.notify_enabled?'checked':''}> ${escapeHtml(a.name)}</label><p class="hint">模式：${escapeHtml(a.notify_mode||'default')}</p></div>`).join('') || '<div class="panel">暂无账号。</div>'; }catch(e){toast(`加载通知失败：${e.message}`);} }
 async function saveNotifications(){ const global={}; document.querySelectorAll('[data-notify-global]').forEach(el=>{global[el.dataset.notifyGlobal]=el.type==='checkbox'?el.checked:el.value}); const accounts=[]; document.querySelectorAll('[data-notify-account]').forEach(el=>accounts.push({account_id:el.dataset.notifyAccount, notify_enabled:el.checked})); await api('/api/notifications',{method:'PATCH', body:JSON.stringify({values:{global,accounts}})}); toast('通知设置已保存'); await loadNotifications(); }
@@ -713,7 +747,7 @@ async function restoreBackup(apply){ const file=$('restoreUploadFile')?.files?.[
 const settingFields = [
   ['monitor_batch_concurrency','监控并发','number'], ['video_parse_concurrency','解析并发','number'], ['batch_parse_size','解析批大小','number'],
   ['batch_download_concurrency','批量下载并发','number'], ['gallery_image_concurrency','图集图片并发','number'], ['download_chunk_size_kb','下载块 KB','number'],
-  ['global_rate_limit_enabled','全局限速','checkbox'], ['cookie_health_persistence_enabled','Cookie健康持久化','checkbox'], ['batch_parse_download_pipeline_enabled','边解析边下载','checkbox'],
+  ['development_bypass_risk_controls_enabled','开发模式：关闭冷却/限速','checkbox'], ['global_request_limiter_enabled','全局请求限速','checkbox'], ['cookie_cooldown_enabled','Cookie失败冷却','checkbox'], ['risk_backoff_enabled','风控退避','checkbox'], ['cookie_health_persistence_enabled','Cookie健康持久化','checkbox'], ['batch_parse_download_pipeline_enabled','边解析边下载','checkbox'],
   ['segmented_download_enabled','大视频分片','checkbox'], ['segmented_download_parts','分片数量','number'], ['segmented_download_min_size_mb','分片阈值 MB','number']
 ];
 async function loadSettings() {
@@ -778,7 +812,7 @@ function bindEvents() {
   $('refreshMediaBtn') && ($('refreshMediaBtn').onclick = loadMediaLibrary); $('mediaSearch') && ($('mediaSearch').oninput = () => setTimeout(loadMediaLibrary, 150)); $('mediaStatus') && ($('mediaStatus').onchange = loadMediaLibrary); $('mediaType') && ($('mediaType').onchange = loadMediaLibrary);
   $('refreshStorageBtn') && ($('refreshStorageBtn').onclick = () => { loadStorage(); loadStorageStats(); }); $('storageStatsBtn') && ($('storageStatsBtn').onclick = loadStorageStats); $('cleanupTempBtn') && ($('cleanupTempBtn').onclick = cleanupTemp); $('scanEmptyBtn') && ($('scanEmptyBtn').onclick = scanEmptyFiles); $('scanDuplicateBtn') && ($('scanDuplicateBtn').onclick = scanDuplicateFiles);
   $('refreshLogsBtn') && ($('refreshLogsBtn').onclick = loadLogs); $('searchLogsBtn') && ($('searchLogsBtn').onclick = searchLogs); $('liveLogBtn') && ($('liveLogBtn').onclick = startLiveLog); $('stopLiveLogBtn') && ($('stopLiveLogBtn').onclick = stopLiveLog);
-  $('refreshRiskBtn') && ($('refreshRiskBtn').onclick = loadRisk);
+  $('refreshRiskBtn') && ($('refreshRiskBtn').onclick = loadRisk); $('saveRiskControlsBtn') && ($('saveRiskControlsBtn').onclick = saveRiskControls); $('clearRiskCookieHealthBtn') && ($('clearRiskCookieHealthBtn').onclick = clearRiskCookieHealth);
   $('saveNotificationsBtn') && ($('saveNotificationsBtn').onclick = saveNotifications); $('reloadNotificationsBtn') && ($('reloadNotificationsBtn').onclick = loadNotifications);
   $('refreshUpdatesBtn') && ($('refreshUpdatesBtn').onclick = loadUpdates); $('checkUpdatesDryBtn') && ($('checkUpdatesDryBtn').onclick = () => checkUpdates(false)); $('checkUpdatesNetworkBtn') && ($('checkUpdatesNetworkBtn').onclick = () => checkUpdates(true));
   $('createFullBackupBtn') && ($('createFullBackupBtn').onclick = () => createBackup(true)); $('createConfigBackupBtn') && ($('createConfigBackupBtn').onclick = () => createBackup(false)); $('refreshBackupsBtn') && ($('refreshBackupsBtn').onclick = loadBackups);

@@ -4,6 +4,19 @@ from .monitor_common import *
 
 
 class ContentMonitorCookieMixin:
+    def _risk_controls_bypassed(self) -> bool:
+        try:
+            return bool(getattr(self.settings, "user_config", {}).get("development_bypass_risk_controls_enabled", False))
+        except Exception:
+            return False
+
+    def _cookie_cooldown_enabled(self) -> bool:
+        try:
+            user_config = getattr(self.settings, "user_config", {}) or {}
+            return bool(user_config.get("cookie_cooldown_enabled", True)) and not self._risk_controls_bypassed()
+        except Exception:
+            return True
+
     def _douyin_cookie_pool(self) -> list[str]:
         try:
             cookies_config = getattr(self.settings, "cookies_config", {}) or {}
@@ -29,10 +42,11 @@ class ContentMonitorCookieMixin:
         if not pool:
             return ""
         now = time.monotonic()
+        cooldown_enabled = self._cookie_cooldown_enabled()
         self._douyin_cookie_cooldowns = {
-            cookie: until for cookie, until in self._douyin_cookie_cooldowns.items() if until > now
+            cookie: until for cookie, until in self._douyin_cookie_cooldowns.items() if cooldown_enabled and until > now
         }
-        store = getattr(self.services, "cookie_health_store", None)
+        store = getattr(self.services, "cookie_health_store", None) if cooldown_enabled else None
         available = []
         for cookie in pool:
             local_until = self._douyin_cookie_cooldowns.get(cookie, 0.0)
@@ -76,6 +90,9 @@ class ContentMonitorCookieMixin:
 
     def _cooldown_douyin_cookie(self, cookie: str, reason: str = "") -> None:
         if not cookie:
+            return
+        if not self._cookie_cooldown_enabled():
+            logger.debug(f"Douyin Cookie cooldown skipped by development/risk-control settings: {sanitize_text(reason)[:120]}")
             return
         try:
             seconds = float(self.settings.user_config.get("douyin_cookie_cooldown_seconds", 600) or 600)

@@ -1,66 +1,18 @@
 # Changelog
 
-## 1.0.0 - 2026-06-23
+## 1.0.2
 
-### 版本定位
+- 严格修复 Win 端问题中心再次出现灰块/空白的问题：问题中心移除会触发 Windows/Flet 灰块的复杂开关卡片、`Switch`、`OutlinedButton` 和扩展空状态容器。
+- 问题中心改为保守布局：`TextButton` 按钮式开关、非扩展 Column、纯文本空状态，避免空列表或复杂控件被渲染为大面积灰色占位。
+- 应用切页增加异常边界：页面加载失败时不再留下空白页，而是显示错误信息，便于定位问题并继续切换其他页面。
+- 验证：`98 passed`，`smoke_check`、`ui_static_check`、`ui_layout_regression_check` 通过。
 
-- 发布 Web Windows-style / Netdisk Storage 版本。
-- 项目从单一 Windows 桌面工具扩展为 Windows 桌面端 + Linux/Docker Web 控制台双形态。
-- Web 端页面结构重新收敛，按 Windows 端使用习惯组织主页面，减少功能分散。
+## 1.0.1
 
-### Web 页面结构调整
-
-- 左侧主导航收敛为：主页、内容监控、视频解析、任务中心、下载历史、问题中心、设置、存储、诊断。
-- 内容监控页内聚合账号管理、新作品箱、批量导入、作品库。
-- 任务中心页内聚合任务记录、下载队列、批量任务、运行日志。
-- 设置页内聚合常用设置、Cookie、通知、更新、访问控制、备份恢复。
-
-### 视频解析改进
-
-- 解析结果改为简洁卡片，默认展示标题、作者、作品 ID、类型和来源链接。
-- 默认不再展开完整解析 JSON，降低页面噪音。
-- 每条解析成功结果新增“下载”按钮，可解析后逐条下载。
-- 保留“解析成功后自动下载”选项。
-- 保留复制直链、打开来源和查看解析明细能力。
-
-### 存储模块重构
-
-- 存储页改为接近 Windows 文件管理器 / 百度网盘的文件管理器布局。
-- 新增网格视图和列表视图切换。
-- 新增左侧文件夹导航、面包屑路径、返回上一级、全部文件入口。
-- 文件夹不再以大卡片独占一整行，改为紧凑文件夹块。
-- 图片显示缩略图，视频显示预览卡片。
-- 支持沉浸式图片/视频预览、上一项/下一项切换、打开/下载和删除。
-- 支持存储扫描、搜索、排序、媒体类型筛选、占用统计、空文件扫描、重复文件扫描和临时文件清理。
-
-### 存储路径与预览修复
-
-- 修复存储页打开文件夹后不显示文件的问题。
-- 修复存储页媒体文件预览接口路径解析错误的问题。
-- 修复相对路径和 `/data/downloads/...` 绝对路径混用导致路径越界或回退根目录的问题。
-- `/api/storage` 新增 `current_relative` 和 `parent_relative`，前端不再自行猜测当前目录。
-- 修复返回上一级目录不可用的问题。
-- 修复面包屑路径、左侧目录导航、手动输入路径、打开文件夹之间的路径同步。
-
-### Web 运行时修复
-
-- 修复 SSE 实时事件中 `started_at` / `created_at` 为字符串时间时直接 `float()` 导致 `/api/events` 崩溃的问题。
-- 时间字段现在兼容数字时间戳、`YYYY-MM-DD HH:MM:SS` 和 ISO 时间字符串。
-- 继续支持 Token 鉴权和 `?x_auth_token=...` 文件访问方式。
-
-### Linux/Docker 部署
-
-- 保留 Dockerfile.web、docker-compose.web.yml、requirements-web-docker.txt。
-- 支持通过 `PIP_INDEX_URL` 和 `DEBIAN_MIRROR` 配置 Python 和 Debian 镜像源。
-- Web 服务默认监听 `0.0.0.0:8080`，运行路径为 `/data`。
-- 文档中补充 Docker 部署、Token 设置、日志查看、重建启动和 GitHub 上传前检查说明。
-
-### 验证
-
-- 代码编译检查通过。
-- 单元测试和回归测试通过，当前测试数量为 98 passed。
-- smoke_check、ui_static_check、ui_layout_regression_check 通过。
-- release 打包流程通过。
+- 修复 Win 端问题中心点击后页面空白的问题：`ft.OutlinedButton` 不再使用当前 Windows Flet 版本不兼容的 `text=` 关键字参数。
+- 保留“风控与调试开关”的按钮式交互，避免 `ft.Switch` 在部分 Windows/Flet 环境渲染成灰色占位块。
+- UI 静态检查新增 Flet 按钮构造兼容性规则，禁止 `ft.OutlinedButton` / `ft.ElevatedButton` / `ft.TextButton` / `ft.FilledButton` 使用 `text=` 关键字，防止同类运行时崩溃再次出现。
+- 验证：`98 passed`，`smoke_check`、`ui_static_check`、`ui_layout_regression_check`、release 打包通过。
 
 ## 0.9.8
 

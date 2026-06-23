@@ -4,6 +4,26 @@ from .parser_common import *
 
 
 class ParserCookiePoolMixin:
+    def _risk_controls_bypassed(self) -> bool:
+        limiter = getattr(self, "request_limiter", None)
+        try:
+            if limiter is not None and hasattr(limiter, "_bypass_enabled") and limiter._bypass_enabled():
+                return True
+        except Exception:
+            pass
+        settings = getattr(self, "settings_config", None)
+        try:
+            return bool(getattr(settings, "user_config", {}).get("development_bypass_risk_controls_enabled", False))
+        except Exception:
+            return False
+
+    def _cookie_cooldown_enabled(self) -> bool:
+        settings = getattr(self, "settings_config", None)
+        try:
+            return bool(getattr(settings, "user_config", {}).get("cookie_cooldown_enabled", True)) and not self._risk_controls_bypassed()
+        except Exception:
+            return not self._risk_controls_bypassed()
+
     def update_cookie(self, platform: str, cookie: str) -> int:
         pool = parse_cookie_pool(cookie)
         cookie_value = pool[0] if pool else sanitize_cookie_header(cookie)
@@ -41,9 +61,10 @@ class ParserCookiePoolMixin:
         if not pool:
             return ""
         now = time.monotonic()
+        cooldown_enabled = self._cookie_cooldown_enabled()
         cooldowns = self._cookie_cooldowns.setdefault(platform_key, {})
-        self._cookie_cooldowns[platform_key] = {cookie: until for cookie, until in cooldowns.items() if until > now}
-        store = getattr(self, "cookie_health_store", None)
+        self._cookie_cooldowns[platform_key] = {cookie: until for cookie, until in cooldowns.items() if cooldown_enabled and until > now}
+        store = getattr(self, "cookie_health_store", None) if cooldown_enabled else None
         available = []
         for cookie in pool:
             local_until = self._cookie_cooldowns[platform_key].get(cookie, 0.0)
@@ -98,6 +119,8 @@ class ParserCookiePoolMixin:
         if "empty" in lowered or "空响应" in lowered or "响应内容为空" in lowered:
             state["empty"] = min(100.0, float(state.get("empty", 0.0) or 0.0) + 1.0)
         state["last_failure"] = time.time()
+        if not self._cookie_cooldown_enabled():
+            return
         seconds = self._cookie_cooldown_seconds(reason)
         self._cookie_cooldowns.setdefault(platform_key, {})[cookie] = time.monotonic() + seconds
         store = getattr(self, "cookie_health_store", None)
