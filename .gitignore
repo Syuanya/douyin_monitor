@@ -1,53 +1,67 @@
-.venv/
+# Python
 __pycache__/
 *.py[cod]
-
-# Runtime output
-/logs/
-/downloads/
-/diagnostics/
-/cache/
-/data/
-/build/
-/dist/
-*.spec
-!packaging/windows/*.spec
-
-# Tool caches
+*$py.class
 .pytest_cache/
-.ruff_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+.tox/
 
-# Local secrets and runtime state
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime data and local state
+data/
+logs/
+downloads/
+diagnostics/
+dist/
+build/
+tmp/
+temp/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Sensitive local config
 .env
 .env.*
 !.env.example
 !.env.web.example
-config/accounts.json
 config/cookies.json
 config/cookies.secure.json
-config/cookie_health.json
 config/douyin_content_monitor.json
+config/accounts.json
 config/parse_history.json
 config/recordings.json
 config/task_records.json
+config/download_history.json
 config/user_settings.json
-config/web_auth.json
-config/*.tmp
-config/*.bak
+config/cookie_health.json
+config/batch_jobs.json
 
-# OS / database / temp files
+# Editor / OS
 .DS_Store
-*.tmp
-*.bak
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite3-*
-assets/fonts/
-*.otf
-*.ttf
-*.woff
-*.woff2
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Release archives and installer outputs
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.exe
+*.msi
+*.pkg
+*.dmg

@@ -48,7 +48,15 @@ class ParserCookiePoolMixin:
         self._cookie_cooldowns.setdefault(platform_key, {})
         # Drop stale health for cookies no longer configured.
         self._cookie_health[platform_key] = {key: value for key, value in self._cookie_health[platform_key].items() if key in pool}
-        self._cookie_cooldowns[platform_key] = {key: value for key, value in self._cookie_cooldowns[platform_key].items() if key in pool}
+        # A changed Cookie pool means the user likely fixed an auth problem.
+        # Clear stale cooldowns and negative parse cache so an immediate retry
+        # uses the new credentials instead of replaying old failures.
+        self._cookie_cooldowns[platform_key] = {}
+        if hasattr(self, "clear_parse_cache"):
+            try:
+                self.clear_parse_cache(failures_only=True)
+            except Exception:
+                pass
         primary_cookie = pool[0] if pool else ""
 
         for _config_path, token_key, module_name in self._cookie_config_targets(platform_key):

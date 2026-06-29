@@ -58,6 +58,88 @@ class RemainingPerformanceCompletionTest(unittest.TestCase):
         self.assertEqual(urls.count("https://www.douyin.com/video/1234567890123456789?previous_page=1"), 1)
         self.assertEqual(len(urls), 2)
 
+
+    def test_url_extractor_accepts_bare_platform_links(self) -> None:
+        parser = VideoParserService(parse_concurrency=1)
+        urls = parser.extract_urls("复制链接 v.douyin.com/AbCdE/ 以及 douyin.com/video/1234567890123456789")
+
+        self.assertIn("https://v.douyin.com/AbCdE/", urls)
+        self.assertIn("https://douyin.com/video/1234567890123456789", urls)
+
+    def test_cookie_update_clears_negative_parse_cache(self) -> None:
+        calls = {"count": 0}
+
+        async def parser_backend(url: str, minimal: bool = True, cookie: str | None = None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("cookie expired")
+            return {
+                "aweme_id": "1234567890123456789",
+                "type": "video",
+                "platform": "douyin",
+                "video_data": {"nwm_video_url": "https://cdn.example/ok.mp4"},
+            }
+
+        async def run_case():
+            parser = VideoParserService(parser=parser_backend, parse_concurrency=1)
+            url = "https://www.douyin.com/video/1234567890123456789"
+            with self.assertRaises(RuntimeError):
+                await parser.parse_url(url)
+            with self.assertRaises(RuntimeError):
+                await parser.parse_url(url)
+            parser.configure_cookie_pool("douyin", ["sessionid=fresh"])
+            data = await parser.parse_url(url)
+            return data
+
+        data = asyncio.run(run_case())
+        self.assertEqual(data["aweme_id"], "1234567890123456789")
+        self.assertEqual(calls["count"], 2)
+
+    def test_fast_check_forces_periodic_full_sync(self) -> None:
+        async def run_case():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                manager = DouyinContentMonitorManager(
+                    DummyServices(
+                        temp_dir,
+                        {"monitor_fast_check_enabled": True, "douyin_monitor_fast_full_sync_every": 1},
+                    )
+                )
+                account = await manager.add_account("https://www.douyin.com/user/MS4wLjABAAAA_force", "force")
+                account.monitor_enabled = True
+                account.aweme_count = 1
+                account.last_aweme_count = 1
+                account.items.append(DouyinContentItem(item_id="old", title="old", share_url="https://www.douyin.com/video/old"))
+                account.known_item_ids = ["old"]
+                account.monitor_history = [{"detail": "无更新（快速检测 1/1）", "success": True}]
+                called = {"parser": False}
+
+                async def fake_fetch_public_profile(account, include_cookie=True):
+                    return "<html></html>", account.homepage_url
+
+                async def fake_hydrate(account_id: str, force: bool = False):
+                    return {"success": True, "display_name": "force"}
+
+                async def fake_profile_info(account):
+                    return {"aweme_count": 1, "sec_uid": "MS4wLjABAAAA_force"}
+
+                async def fake_parser(account, max_pages=None):
+                    called["parser"] = True
+                    return [DouyinContentItem(item_id="old", title="old", share_url="https://www.douyin.com/video/old")]
+
+                manager.fetch_public_profile = fake_fetch_public_profile  # type: ignore[method-assign]
+                manager.hydrate_account_display_name = fake_hydrate  # type: ignore[method-assign]
+                manager.fetch_user_profile_info = fake_profile_info  # type: ignore[method-assign]
+                manager._public_profile_page_matches_account = lambda account, text, url: True  # type: ignore[method-assign]
+                manager._profile_info_matches_account = lambda account, info: True  # type: ignore[method-assign]
+                manager.fetch_parser_user_posts = fake_parser  # type: ignore[method-assign]
+                result = await manager.check_account(account.account_id)
+                return result, called["parser"]
+
+        result, parser_called = asyncio.run(run_case())
+        self.assertTrue(result["success"])
+        self.assertTrue(parser_called)
+        self.assertNotIn("快速检测", result["reason"])
+
     def test_cookie_health_store_persists_cooldown_without_raw_cookie(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             raw_cookie = "sessionid=secret-value; uid=1"

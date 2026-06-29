@@ -11,6 +11,8 @@ else:
 class ContentMergeService:
     """Rules for merging detected works into an account state."""
 
+    KNOWN_ITEM_HISTORY_LIMIT = 2000
+
     def __init__(
         self,
         *,
@@ -56,7 +58,10 @@ class ContentMergeService:
                 if not first_success and item.item_id not in known:
                     new_items.append(item)
         account.items = self.sort_items_newest_first(account.items)[:200]
-        account.known_item_ids = list(dict.fromkeys([item.item_id for item in detected_items] + list(account.known_item_ids)))[:500]
+        account.known_item_ids = self._merge_known_item_ids(
+            [item.item_id for item in detected_items if getattr(item, "item_id", "")],
+            list(getattr(account, "known_item_ids", []) or []),
+        )
         account.last_item_id = detected_items[0].item_id if detected_items else account.last_item_id
         return new_items
 
@@ -67,9 +72,17 @@ class ContentMergeService:
         normal_items = [item for item in self.sort_items_newest_first(account.items) if item.status != "count_only"]
         count_items = [item for item in account.items if item.status == "count_only"]
         keep_items = normal_items[:limit] + count_items[: min(len(count_items), 20)]
-        keep_ids = {item.item_id for item in keep_items}
         account.items = keep_items
-        account.known_item_ids = [item_id for item_id in account.known_item_ids if item_id in keep_ids]
+        # UI retention only limits visible work cards.  The de-duplication
+        # history must remain longer-lived, otherwise old works that are trimmed
+        # from the UI can be reported as "new" again when the platform returns
+        # them in a later page.
+        account.known_item_ids = list(dict.fromkeys([str(item_id) for item_id in (getattr(account, "known_item_ids", []) or []) if item_id]))[: self.KNOWN_ITEM_HISTORY_LIMIT]
+
+    @classmethod
+    def _merge_known_item_ids(cls, detected_ids: list[str], existing_ids: list[str]) -> list[str]:
+        merged = list(dict.fromkeys([str(item_id) for item_id in detected_ids + existing_ids if item_id]))
+        return merged[: cls.KNOWN_ITEM_HISTORY_LIMIT]
 
     @staticmethod
     def auto_pause_if_needed(account: Any) -> bool:

@@ -58,6 +58,19 @@ class ContentMergeServiceTest(unittest.TestCase):
         self.assertEqual([item.item_id for item in new_items], ["2"])
         self.assertEqual(account.items[0].status, "new")
 
+
+    def test_retention_preserves_known_history_for_deduplication(self) -> None:
+        account = Account(
+            items=[Item("3"), Item("2"), Item("1")],
+            known_item_ids=["3", "2", "1", "old-trimmed"],
+            keep_recent_count=1,
+        )
+
+        self.service().apply_retention(account)
+
+        self.assertEqual([item.item_id for item in account.items], ["3"])
+        self.assertIn("old-trimmed", account.known_item_ids)
+
     def test_auto_pause_if_needed(self) -> None:
         account = Account(auto_pause_failures=2, error_count=2)
 

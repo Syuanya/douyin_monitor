@@ -159,8 +159,8 @@ def create_account_card(page: Any, account: Any) -> ft.Container:
                         ft.Row(
                             controls=[
                                 ft.TextButton(page._.get("select", "查看历史"), icon=ft.Icons.HISTORY, on_click=lambda e, account_id=account.account_id: page.run_async(page.open_account_works(account_id))),
-                                ft.TextButton(page._.get("check_now", "检测一次"), icon=ft.Icons.REFRESH, on_click=lambda e, account_id=account.account_id: page.run_async(page.check_one(account_id))),
-                                ft.TextButton(page._.get("sync_works", "同步作品"), icon=ft.Icons.CLOUD_SYNC, on_click=lambda e, account_id=account.account_id: page.run_async(page.sync_works(account_id))),
+                                ft.TextButton(page._.get("check_now", "快速检测更新"), icon=ft.Icons.REFRESH, on_click=lambda e, account_id=account.account_id: page.run_async(page.check_one(account_id))),
+                                ft.TextButton(page._.get("sync_works", "同步作品列表"), icon=ft.Icons.CLOUD_SYNC, on_click=lambda e, account_id=account.account_id: page.run_async(page.sync_works(account_id))),
                                 ft.TextButton("编辑", icon=ft.Icons.SETTINGS, on_click=lambda e, account_id=account.account_id: page.run_async(page.show_edit_account_dialog(account_id))),
                                 ft.IconButton(icon=icon("INSIGHTS", "HISTORY"), tooltip="查看监控历史", on_click=lambda e, account_id=account.account_id: page.run_async(page.show_monitor_history_dialog(account_id)), icon_color=ft.Colors.PRIMARY),
                                 ft.TextButton(page._.get("start", "开始监控") if not account.monitor_enabled else page._.get("stop", "停止监控"), icon=ft.Icons.PLAY_ARROW if not account.monitor_enabled else ft.Icons.STOP, on_click=lambda e, account_id=account.account_id, enabled=account.monitor_enabled: page.run_async(page.toggle_monitor(account_id, enabled))),

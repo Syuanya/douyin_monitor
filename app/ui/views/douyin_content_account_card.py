@@ -30,8 +30,12 @@ def build_account_card(view, account):
     account_checkbox = ft.Checkbox(
         value=account.account_id in view.selected_account_ids,
         visible=view.account_select_mode,
+        disabled=getattr(view, "batch_job_running", False),
         on_change=lambda e, account_id=account.account_id: view.run_async(view.toggle_account_selected(account_id, bool(e.control.value))),
     )
+    register_checkbox = getattr(view, "_register_account_checkbox", None)
+    if callable(register_checkbox):
+        register_checkbox(account.account_id, account_checkbox)
 
     info_lines = [
         f"{view._.get('douyin_nickname', '抖音昵称')}：{account.douyin_nickname or '-'}",
@@ -92,8 +96,8 @@ def build_account_card(view, account):
                         ft.Row(
                             controls=[
                                 ft.TextButton(view._.get("select", "查看历史"), icon=ft.Icons.HISTORY, on_click=lambda e, account_id=account.account_id: view.run_async(view.open_account_works(account_id))),
-                                ft.TextButton(view._.get("check_now", "检测一次"), icon=ft.Icons.REFRESH, on_click=lambda e, account_id=account.account_id: view.run_async(view.check_one(account_id))),
-                                ft.TextButton(view._.get("sync_works", "同步作品"), icon=ft.Icons.CLOUD_SYNC, on_click=lambda e, account_id=account.account_id: view.run_async(view.sync_works(account_id))),
+                                ft.TextButton(view._.get("check_now", "快速检测更新"), icon=ft.Icons.REFRESH, on_click=lambda e, account_id=account.account_id: view.run_async(view.check_one(account_id))),
+                                ft.TextButton(view._.get("sync_works", "同步作品列表"), icon=ft.Icons.CLOUD_SYNC, on_click=lambda e, account_id=account.account_id: view.run_async(view.sync_works(account_id))),
                                 ft.TextButton("编辑", icon=ft.Icons.SETTINGS, on_click=lambda e, account_id=account.account_id: view.run_async(view.show_edit_account_dialog(account_id))),
                                 ft.IconButton(icon=icon("INSIGHTS", "HISTORY"), tooltip="查看监控历史", on_click=lambda e, account_id=account.account_id: view.run_async(view.show_monitor_history_dialog(account_id)), icon_color=ft.Colors.PRIMARY),
                                 ft.TextButton(

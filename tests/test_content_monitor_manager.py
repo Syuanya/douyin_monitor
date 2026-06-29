@@ -12,7 +12,7 @@ MISSING_RUNTIME_DEPS = [
 ]
 
 if not MISSING_RUNTIME_DEPS:
-    from app.core.content_monitor.douyin_content_monitor import DouyinContentItem, DouyinContentMonitorManager
+    from app.core.content_monitor.douyin_content_monitor import DouyinContentItem, DouyinContentMonitorManager, DouyinMonitorAccount
     from app.core.storage.sqlite_store import SQLiteStore
 
 
@@ -106,5 +106,43 @@ class ContentMonitorManagerTest(unittest.TestCase):
                 self.assertEqual(result["total"], 1)
                 stored = services.sqlite_store.load_monitor_accounts()
                 self.assertEqual(stored[0]["items"][0]["item_id"], "100000001")
+
+        asyncio.run(run_case())
+
+    @unittest.skipIf(bool(MISSING_RUNTIME_DEPS), f"runtime dependencies missing: {MISSING_RUNTIME_DEPS}")
+    def test_batch_update_account_settings_persists_once(self) -> None:
+        async def run_case() -> None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                manager = DouyinContentMonitorManager(DummyServices(temp_dir))
+                manager._accounts = [
+                    DouyinMonitorAccount(
+                        account_id=f"acc-{index}",
+                        homepage_url=f"https://www.douyin.com/user/MS4wLjABAAAA_{index}",
+                        group_name="old",
+                        auto_download_policy="none",
+                        notify_enabled=True,
+                    )
+                    for index in range(10)
+                ]
+                save_calls = 0
+
+                def fake_save(_accounts=None) -> None:
+                    nonlocal save_calls
+                    save_calls += 1
+
+                manager._save_accounts_sync = fake_save
+                result = await manager.update_account_settings_batch(
+                    [account.account_id for account in manager.accounts],
+                    group_name="new-group",
+                    auto_download_policy="all",
+                    notify_enabled=False,
+                )
+
+                self.assertEqual(result["updated"], 10)
+                self.assertEqual(result["changed"], 10)
+                self.assertEqual(save_calls, 1)
+                self.assertTrue(all(account.group_name == "new-group" for account in manager.accounts))
+                self.assertTrue(all(account.auto_download_policy == "all" for account in manager.accounts))
+                self.assertTrue(all(account.notify_enabled is False for account in manager.accounts))
 
         asyncio.run(run_case())

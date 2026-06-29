@@ -45,6 +45,7 @@ INT_RANGES = {
     "segmented_download_min_size_mb": (1, 4096),
     "douyin_cookie_cooldown_seconds": (60, 3600),
     "douyin_monitor_incremental_pages": (1, 20),
+    "douyin_monitor_fast_full_sync_every": (0, 100),
     "douyin_global_requests_per_minute": (1, 600),
     "douyin_api_requests_per_minute": (1, 600),
     "douyin_cookie_requests_per_minute": (1, 600),
@@ -64,6 +65,7 @@ FLOAT_RANGES = {
 ENUMS = {
     "theme_mode": {"light", "dark", "system"},
     "douyin_parser_backend": {"internal", "external"},
+    "gallery_image_save_format": {"original", "png"},
     "auto_update_channel": {"stable", "beta", "dev"},
     "auto_update_install_kind": {"installer", "portable"},
 }

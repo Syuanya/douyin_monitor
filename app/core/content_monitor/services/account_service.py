@@ -86,19 +86,27 @@ class ContentMonitorAccountMixin:
 
     @staticmethod
     def normalize_homepage_url(raw_url: str) -> str:
-        text = str(raw_url or "").strip()
+        text = str(raw_url or "").strip().rstrip("。；;，,)\"'")
         if not text:
-            raise ValueError("请输入抖音主页链接")
+            raise ValueError("请输入抖音用户主页链接")
         if not re.match(r"^https?://", text, re.IGNORECASE):
             text = "https://" + text
         parts = urlsplit(text)
         host = (parts.netloc or "").lower()
+        path = parts.path.rstrip("/") or "/"
         if not host:
             raise ValueError("主页链接无效")
         if not DOUYIN_HOST_RE.search(host):
-            raise ValueError("只支持公开抖音主页链接")
+            raise ValueError("只支持公开抖音用户主页链接")
+        lowered_path = path.lower()
+        if "live.douyin.com" in host or "/live" in lowered_path:
+            raise ValueError("这是直播间链接，不能作为内容监控账号；请粘贴作者的抖音用户主页链接")
+        if re.search(r"/(video|note|discover|share/video)(/|$)", lowered_path):
+            raise ValueError("这是作品链接，请到“视频解析”页面使用；内容监控请粘贴用户主页链接")
+        if "/user/" not in lowered_path:
+            raise ValueError("请粘贴抖音用户主页链接，格式类似：https://www.douyin.com/user/...")
         # Keep path, remove query/fragment to reduce expired tracking params.
-        return urlunsplit((parts.scheme or "https", parts.netloc, parts.path.rstrip("/") or "/", "", ""))
+        return urlunsplit((parts.scheme or "https", parts.netloc, path, "", ""))
 
     def find_account(self, account_id: str) -> DouyinMonitorAccount | None:
         for account in self._accounts:
@@ -335,6 +343,79 @@ class ContentMonitorAccountMixin:
             self.services.broadcast_pubsub("douyin_monitor_update", {"event": "restored", "count": restored})
         return restored
 
+    def _apply_account_settings(
+        self,
+        account: DouyinMonitorAccount,
+        *,
+        display_name: str | None = None,
+        group_name: str | None = None,
+        auto_download_policy: str | None = None,
+        monitor_interval_minutes: float | None = None,
+        auto_sync_enabled: bool | None = None,
+        auto_pause_failures: int | None = None,
+        keep_recent_count: int | None = None,
+        notify_mode: str | None = None,
+        notify_enabled: bool | None = None,
+    ) -> bool:
+        changed = False
+        if display_name is not None:
+            value = str(display_name or "").strip() or account.display_name
+            if account.display_name != value:
+                account.display_name = value
+                changed = True
+        if group_name is not None:
+            value = str(group_name or "").strip()
+            if account.group_name != value:
+                account.group_name = value
+                changed = True
+        if auto_download_policy is not None:
+            policy = str(auto_download_policy or "none").strip()
+            value = policy if policy in {"none", "video", "gallery", "all"} else "none"
+            if account.auto_download_policy != value:
+                account.auto_download_policy = value
+                changed = True
+        if monitor_interval_minutes is not None:
+            try:
+                value = max(0.0, float(monitor_interval_minutes or 0))
+            except (TypeError, ValueError):
+                value = 0.0
+            if account.monitor_interval_minutes != value:
+                account.monitor_interval_minutes = value
+                changed = True
+        if auto_sync_enabled is not None:
+            value = bool(auto_sync_enabled)
+            if account.auto_sync_enabled != value:
+                account.auto_sync_enabled = value
+                changed = True
+        if auto_pause_failures is not None:
+            try:
+                value = max(0, int(auto_pause_failures or 0))
+            except (TypeError, ValueError):
+                value = 0
+            if account.auto_pause_failures != value:
+                account.auto_pause_failures = value
+                changed = True
+        if keep_recent_count is not None:
+            try:
+                value = max(0, int(keep_recent_count or 0))
+            except (TypeError, ValueError):
+                value = 0
+            if account.keep_recent_count != value:
+                account.keep_recent_count = value
+                changed = True
+        if notify_mode is not None:
+            mode = str(notify_mode or "desktop")
+            value = mode if mode in {"desktop", "task", "silent"} else "desktop"
+            if account.notify_mode != value:
+                account.notify_mode = value
+                changed = True
+        if notify_enabled is not None:
+            value = bool(notify_enabled)
+            if account.notify_enabled != value:
+                account.notify_enabled = value
+                changed = True
+        return changed
+
     async def update_account_settings(
         self,
         account_id: str,
@@ -349,41 +430,77 @@ class ContentMonitorAccountMixin:
         notify_mode: str | None = None,
         notify_enabled: bool | None = None,
     ) -> bool:
-        account = self.find_account(account_id)
-        if not account:
-            return False
-        if display_name is not None:
-            account.display_name = str(display_name or "").strip() or account.display_name
-        if group_name is not None:
-            account.group_name = str(group_name or "").strip()
-        if auto_download_policy is not None:
-            policy = str(auto_download_policy or "none").strip()
-            account.auto_download_policy = policy if policy in {"none", "video", "gallery", "all"} else "none"
-        if monitor_interval_minutes is not None:
-            try:
-                account.monitor_interval_minutes = max(0.0, float(monitor_interval_minutes or 0))
-            except (TypeError, ValueError):
-                account.monitor_interval_minutes = 0.0
-        if auto_sync_enabled is not None:
-            account.auto_sync_enabled = bool(auto_sync_enabled)
-        if auto_pause_failures is not None:
-            try:
-                account.auto_pause_failures = max(0, int(auto_pause_failures or 0))
-            except (TypeError, ValueError):
-                account.auto_pause_failures = 0
-        if keep_recent_count is not None:
-            try:
-                account.keep_recent_count = max(0, int(keep_recent_count or 0))
-            except (TypeError, ValueError):
-                account.keep_recent_count = 0
-        if notify_mode is not None:
-            mode = str(notify_mode or "desktop")
-            account.notify_mode = mode if mode in {"desktop", "task", "silent"} else "desktop"
-        if notify_enabled is not None:
-            account.notify_enabled = bool(notify_enabled)
-        await self.persist(force=True)
-        self.services.broadcast_pubsub("douyin_monitor_update", {"event": "account_settings", "account_id": account_id})
+        async with self._lock:
+            account = self.find_account(account_id)
+            if not account:
+                return False
+            changed = self._apply_account_settings(
+                account,
+                display_name=display_name,
+                group_name=group_name,
+                auto_download_policy=auto_download_policy,
+                monitor_interval_minutes=monitor_interval_minutes,
+                auto_sync_enabled=auto_sync_enabled,
+                auto_pause_failures=auto_pause_failures,
+                keep_recent_count=keep_recent_count,
+                notify_mode=notify_mode,
+                notify_enabled=notify_enabled,
+            )
+            if changed:
+                await self.persist(force=True)
+        if changed:
+            self.services.broadcast_pubsub("douyin_monitor_update", {"event": "account_settings", "account_id": account_id})
         return True
+
+    async def update_account_settings_batch(
+        self,
+        account_ids: list[str],
+        *,
+        group_name: str | None = None,
+        auto_download_policy: str | None = None,
+        notify_enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        requested = [str(item) for item in account_ids if str(item or "").strip()]
+        target_ids = set(requested)
+        updated: list[str] = []
+        missing: list[str] = []
+        changed_count = 0
+        async with self._lock:
+            by_id = {account.account_id: account for account in self._accounts}
+            for account_id in requested:
+                account = by_id.get(account_id)
+                if account is None:
+                    missing.append(account_id)
+                    continue
+                changed = self._apply_account_settings(
+                    account,
+                    group_name=group_name,
+                    auto_download_policy=auto_download_policy,
+                    notify_enabled=notify_enabled,
+                )
+                updated.append(account_id)
+                if changed:
+                    changed_count += 1
+            if changed_count:
+                await self.persist(force=True)
+        if updated:
+            self.services.broadcast_pubsub(
+                "douyin_monitor_update",
+                {
+                    "event": "account_settings_batch",
+                    "account_ids": updated,
+                    "changed": changed_count,
+                    "missing": missing,
+                },
+            )
+        return {
+            "success": True,
+            "requested": len(target_ids),
+            "updated": len(updated),
+            "changed": changed_count,
+            "missing": missing,
+            "account_ids": updated,
+        }
 
     async def start_all(self) -> dict[str, Any]:
         return await self.set_monitor_enabled_batch(None, True)

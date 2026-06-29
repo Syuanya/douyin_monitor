@@ -11,7 +11,7 @@ import httpx
 from ..runtime.media_task_queue import report_media_task_progress
 from .file_naming import DEFAULT_FILENAME_TEMPLATE, format_media_filename, safe_filename
 from .image_conversion import save_image_as_png
-from .image_urls import deduplicate_image_urls
+from .image_urls import IMAGE_SUFFIXES, deduplicate_image_urls, infer_image_suffix
 from .resumable_download import download_http_file
 from .video_parser_service import ParsedVideoResult
 
@@ -88,16 +88,20 @@ class ParsedMediaDownloader:
 
         async def run_download() -> str:
             limit = self._gallery_image_concurrency()
+            save_format = self._gallery_image_save_format()
             sem = asyncio.Semaphore(limit)
 
             async def download_one(index: int, url: str) -> None:
-                save_path = os.path.join(save_dir, f"{self._safe_item_id(item)}_{index:03d}.png")
-                if self._valid_file(save_path):
+                if self._existing_gallery_image_path(save_dir, item, index):
                     return
+                save_path = self._gallery_image_save_path(save_dir, item, index, url, save_format)
                 async with sem:
-                    if self._valid_file(save_path):
+                    if self._existing_gallery_image_path(save_dir, item, index):
                         return
-                    await self._download_image_as_png(url, save_path)
+                    if save_format == "png":
+                        await self._download_image_as_png(url, save_path)
+                    else:
+                        await self._download_file(url, save_path)
 
             await asyncio.gather(*(download_one(index, url) for index, url in enumerate(urls, start=1)))
             return save_dir
@@ -180,7 +184,11 @@ class ParsedMediaDownloader:
 
     def _gallery_files(self, folder: str) -> list[str]:
         try:
-            return [str(path) for path in sorted(Path(folder).glob("*.png")) if self._valid_file(str(path))]
+            return [
+                str(path)
+                for path in sorted(Path(folder).glob("*"))
+                if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES and self._valid_file(str(path))
+            ]
         except OSError:
             return []
 
@@ -188,6 +196,24 @@ class ParsedMediaDownloader:
         if expected_count <= 0 or not os.path.isdir(folder):
             return False
         return len(self._gallery_files(folder)) >= expected_count
+
+    def _gallery_image_save_format(self) -> str:
+        settings = getattr(self.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        value = str(config.get("gallery_image_save_format") or "original").strip().lower()
+        return value if value in {"original", "png"} else "original"
+
+    def _gallery_image_save_path(self, folder: str, item: ParsedVideoResult, index: int, url: str, save_format: str) -> str:
+        suffix = ".png" if save_format == "png" else infer_image_suffix(url, fallback=".jpg")
+        return os.path.join(folder, f"{self._safe_item_id(item)}_{index:03d}{suffix}")
+
+    def _existing_gallery_image_path(self, folder: str, item: ParsedVideoResult, index: int) -> str:
+        stem = f"{self._safe_item_id(item)}_{index:03d}"
+        for suffix in sorted(IMAGE_SUFFIXES):
+            candidate = os.path.join(folder, f"{stem}{suffix}")
+            if self._valid_file(candidate):
+                return candidate
+        return ""
 
     async def _download_image_as_png(self, url: str, save_path: str) -> None:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)

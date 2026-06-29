@@ -47,6 +47,10 @@ class DouyinContentMonitorPage(PageBase):
         self.account_search_query = ""
         self.account_filter = "all"
         self.account_group_filter = "all"
+        self.account_visible_count = 30
+        self.account_page_size = 30
+        self._pending_monitor_refresh = False
+        self._last_pubsub_refresh_at = 0.0
         self.return_account_anchor_id: str | None = None
         self.pending_account_scroll_anchor_id: str | None = None
         self.account_scroll_anchor_hold_until = 0.0
@@ -61,6 +65,19 @@ class DouyinContentMonitorPage(PageBase):
         self.download_progress_text = ""
         self.download_failure_reasons: list[str] = []
         self.batch_result_lines: list[str] = []
+        self.batch_progress_text = ""
+        self.batch_progress_total = 0
+        self.batch_progress_completed = 0
+        self.batch_progress_success = 0
+        self.batch_progress_failed = 0
+        self.batch_progress_new_total = 0
+        self.batch_progress_cancelled = False
+        self.batch_progress_title = ""
+        self.batch_selection_text_control: ft.Text | None = None
+        self.batch_progress_text_control: ft.Text | None = None
+        self.batch_progress_bar_control: ft.ProgressBar | None = None
+        self.batch_toolbar_buttons: dict[str, ft.Control] = {}
+        self.account_checkbox_controls: dict[str, ft.Checkbox] = {}
         self.batch_import_picker: ft.FilePicker | None = None
         self.batch_job_running = False
         self.batch_cancel_requested = False
@@ -187,7 +204,7 @@ class DouyinContentMonitorPage(PageBase):
                         self.loading_indicator,
                         ft.IconButton(
                             icon=ft.Icons.STOP_CIRCLE,
-                            tooltip="取消当前批量检测/同步",
+                            tooltip="处理完当前请求后停止批量检测/同步",
                             disabled=not self.batch_job_running,
                             on_click=lambda e: self.run_async(self.cancel_batch_job()),
                             icon_color=ft.Colors.ERROR,
@@ -204,6 +221,13 @@ class DouyinContentMonitorPage(PageBase):
                             tooltip=f"打开新作品箱（当前 {self._pending_new_work_count()} 个）",
                             on_click=lambda e: self.run_async(self.open_new_work_inbox()),
                         ),
+                        ft.TextButton(
+                            f"异常修复 {len(self._error_accounts())}",
+                            icon=ft.Icons.HEALTH_AND_SAFETY,
+                            tooltip="集中查看 Cookie、风控、主页不可访问等异常账号",
+                            disabled=not self._error_accounts(),
+                            on_click=lambda e: self.run_async(self.open_error_repair_center()),
+                        ),
                         ft.IconButton(
                             icon=ft.Icons.ADD,
                             tooltip="添加监控用户",
@@ -218,7 +242,7 @@ class DouyinContentMonitorPage(PageBase):
                         ),
                         ft.IconButton(
                             icon=ft.Icons.REFRESH,
-                            tooltip="刷新界面（不请求抖音；检测更新请点下方检测按钮）",
+                            tooltip="刷新界面（不请求抖音；需要请求平台请点快速检测或同步作品列表）",
                             on_click=self.refresh_on_click,
                             icon_color=ft.Colors.PRIMARY,
                         ),
@@ -248,17 +272,17 @@ class DouyinContentMonitorPage(PageBase):
                     controls=[
                         self._monitor_summary_chip(),
                         *self._account_filter_buttons(),
-                        ft.IconButton(
+                        ft.TextButton(
+                            "快速检测更新",
                             icon=ft.Icons.REFRESH,
-                            tooltip="检测更新：低成本检查账号是否有新作品",
+                            tooltip="低成本检查账号是否有新作品；不会完整拉取作品明细",
                             on_click=lambda e: self.run_async(self.check_all_enabled_on_click()),
-                            icon_color=ft.Colors.PRIMARY,
                         ),
-                        ft.IconButton(
+                        ft.TextButton(
+                            "同步作品列表",
                             icon=ft.Icons.CLOUD_SYNC,
-                            tooltip="同步作品：会请求作品明细，账号多时建议低频使用",
+                            tooltip="请求作品明细、封面和下载信息；账号多时建议低频使用",
                             on_click=lambda e: self.run_async(self.sync_all_accounts_on_click()),
-                            icon_color=ft.Colors.PRIMARY,
                         ),
                         ft.IconButton(
                             icon=ft.Icons.DOWNLOAD,
@@ -289,7 +313,7 @@ class DouyinContentMonitorPage(PageBase):
                     wrap=True,
                 ),
                 self._account_group_filter_area(),
-                *([self._batch_account_toolbar()] if self.account_select_mode else []),
+                *([self._batch_account_toolbar()] if self.account_select_mode else ([self._batch_progress_panel()] if (self.batch_job_running or self.batch_progress_text) else [])),
             ],
             spacing=6,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -370,31 +394,230 @@ class DouyinContentMonitorPage(PageBase):
             controls.append(ft.Text(f"+{len(groups) - 10}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
         return ft.Row(controls=controls, spacing=6, wrap=True)
 
+    def _register_account_checkbox(self, account_id: str, checkbox: ft.Checkbox) -> None:
+        self.account_checkbox_controls[str(account_id)] = checkbox
+
+    def _update_account_checkbox_values(self) -> None:
+        for account_id, checkbox in list(self.account_checkbox_controls.items()):
+            try:
+                checkbox.value = account_id in self.selected_account_ids
+                checkbox.disabled = bool(self.batch_job_running)
+                checkbox.visible = bool(self.account_select_mode)
+                checkbox.update()
+            except Exception:
+                pass
+
+    def _batch_selection_summary(self) -> tuple[int, int, int]:
+        visible_accounts = self._visible_accounts()
+        visible_ids = {account.account_id for account in visible_accounts}
+        return len(self.selected_account_ids & visible_ids), len(visible_accounts), len(self.selected_account_ids)
+
+    def _update_batch_account_toolbar_fast(self) -> None:
+        selected_visible, visible_total, selected_total = self._batch_selection_summary()
+        running = bool(self.batch_job_running)
+        if self.batch_selection_text_control is not None:
+            try:
+                self.batch_selection_text_control.value = f"批量处理：当前列表已选 {selected_visible}/{visible_total}，总已选 {selected_total}"
+                self.batch_selection_text_control.update()
+            except Exception:
+                pass
+        button_rules = {
+            "select_all": running,
+            "invert": running,
+            "clear": running or not selected_total,
+            "check": running or not selected_total,
+            "sync": running or not selected_total,
+            "settings": running or not selected_total,
+            "start": running or not selected_total,
+            "stop": running or not selected_total,
+            "delete": running or not selected_total,
+            "cancel": (not running) or self.batch_cancel_requested,
+            "close": running,
+        }
+        for name, disabled in button_rules.items():
+            control = self.batch_toolbar_buttons.get(name)
+            if control is None:
+                continue
+            try:
+                control.disabled = disabled
+                control.update()
+            except Exception:
+                pass
+
+    def _update_batch_progress_controls(self) -> None:
+        visible = bool(self.batch_progress_text or self.batch_job_running)
+        if self.batch_progress_text_control is not None:
+            try:
+                self.batch_progress_text_control.value = self._batch_progress_label()
+                self.batch_progress_text_control.visible = visible
+                self.batch_progress_text_control.color = ft.Colors.ERROR if self.batch_progress_cancelled else (ft.Colors.PRIMARY if self.batch_job_running else ft.Colors.ON_SURFACE_VARIANT)
+                self.batch_progress_text_control.update()
+            except Exception:
+                pass
+        if self.batch_progress_bar_control is not None:
+            try:
+                self.batch_progress_bar_control.value = self._batch_progress_value()
+                self.batch_progress_bar_control.visible = visible
+                self.batch_progress_bar_control.update()
+            except Exception:
+                pass
+        self._update_batch_account_toolbar_fast()
+
+    def _set_batch_progress_state(
+        self,
+        *,
+        title: str | None = None,
+        completed: int | None = None,
+        total: int | None = None,
+        success: int | None = None,
+        failed: int | None = None,
+        new_total: int | None = None,
+        current: str = "",
+        cancelled: bool | None = None,
+        final: bool = False,
+    ) -> None:
+        if title is not None:
+            self.batch_progress_title = title
+        if completed is not None:
+            self.batch_progress_completed = max(0, int(completed))
+        if total is not None:
+            self.batch_progress_total = max(0, int(total))
+        if success is not None:
+            self.batch_progress_success = max(0, int(success))
+        if failed is not None:
+            self.batch_progress_failed = max(0, int(failed))
+        if new_total is not None:
+            self.batch_progress_new_total = max(0, int(new_total))
+        if cancelled is not None:
+            self.batch_progress_cancelled = bool(cancelled)
+        status = "已取消" if self.batch_progress_cancelled else ("已完成" if final else "处理中")
+        current_text = f"，当前：{current}" if current and not final else ""
+        new_text = f"，新增 {self.batch_progress_new_total}" if self.batch_progress_new_total else ""
+        self.batch_progress_text = (
+            f"{self.batch_progress_title or '批量任务'} {status}："
+            f"{self.batch_progress_completed}/{self.batch_progress_total}，"
+            f"成功 {self.batch_progress_success}，失败 {self.batch_progress_failed}{new_text}{current_text}"
+        )
+
+    def _account_batch_parallel_limit(self) -> int:
+        settings = getattr(self.app.services, "settings_config", None)
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        raw = config.get("monitor_batch_concurrency", config.get("douyin_content_monitor_batch_concurrency", 2))
+        try:
+            value = int(raw or 2)
+        except (TypeError, ValueError):
+            value = 2
+        return max(1, min(4, value))
+
     def _batch_account_toolbar(self) -> ft.Container:
         visible_accounts = self._visible_accounts()
         visible_ids = {account.account_id for account in visible_accounts}
         selected_visible = len(self.selected_account_ids & visible_ids)
         selected_total = len(self.selected_account_ids)
+        running = bool(self.batch_job_running)
+        self.batch_selection_text_control = ft.Text(
+            f"批量处理：当前列表已选 {selected_visible}/{len(visible_accounts)}，总已选 {selected_total}",
+            size=12,
+            color=ft.Colors.PRIMARY,
+        )
+        self.batch_progress_text_control = ft.Text(
+            self._batch_progress_label(),
+            size=12,
+            color=ft.Colors.PRIMARY if running else ft.Colors.ON_SURFACE_VARIANT,
+            selectable=True,
+            visible=bool(self.batch_progress_text or running),
+        )
+        self.batch_progress_bar_control = ft.ProgressBar(
+            value=self._batch_progress_value(),
+            visible=bool(self.batch_progress_text or running),
+            expand=True,
+        )
+
+        def button(name: str, control: ft.Control) -> ft.Control:
+            self.batch_toolbar_buttons[name] = control
+            return control
+
+        self.batch_toolbar_buttons = {}
+        toolbar = ft.Row(
+            controls=[
+                self.batch_selection_text_control,
+                button("select_all", ft.IconButton(icon=ft.Icons.SELECT_ALL, tooltip="全选/取消全选当前列表", disabled=running, on_click=lambda e: self.run_async(self.select_all_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("invert", ft.IconButton(icon=ft.Icons.CHECKLIST, tooltip="反选当前列表", disabled=running, on_click=lambda e: self.run_async(self.invert_visible_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("clear", ft.IconButton(icon=ft.Icons.CLEAR, tooltip="清空选择", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.clear_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("check", ft.IconButton(icon=ft.Icons.REFRESH, tooltip="检测选中", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.check_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("sync", ft.IconButton(icon=ft.Icons.CLOUD_SYNC, tooltip="同步选中", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.sync_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("settings", ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="批量设置", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.show_batch_account_settings_dialog()), icon_color=ft.Colors.PRIMARY)),
+                button("start", ft.IconButton(icon=ft.Icons.PLAY_ARROW, tooltip="开始监控", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.start_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("stop", ft.IconButton(icon=ft.Icons.STOP, tooltip="停止监控", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.stop_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("delete", ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="删除选中", disabled=running or not selected_total, on_click=lambda e: self.run_async(self.delete_selected_accounts()), icon_color=ft.Colors.PRIMARY)),
+                button("cancel", ft.IconButton(icon=ft.Icons.CANCEL, tooltip="取消当前批量任务", disabled=not running or self.batch_cancel_requested, on_click=lambda e: self.run_async(self.cancel_batch_job()), icon_color=ft.Colors.ERROR)),
+                button("close", ft.IconButton(icon=ft.Icons.CLOSE, tooltip="退出批量选择", disabled=running, on_click=lambda e: self.run_async(self.toggle_account_select_mode()), icon_color=ft.Colors.PRIMARY)),
+            ],
+            spacing=6,
+            wrap=True,
+        )
+        progress_row = ft.Row(
+            controls=[
+                ft.Icon(ft.Icons.HOURGLASS_TOP if running else ft.Icons.INFO_OUTLINE, size=16, color=ft.Colors.PRIMARY),
+                self.batch_progress_bar_control,
+                ft.TextButton("查看明细", icon=ft.Icons.LIST_ALT, on_click=lambda e: self.run_async(self.show_batch_result_dialog())),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=bool(self.batch_progress_text or running),
+        )
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
             border_radius=8,
             padding=ft.Padding.symmetric(horizontal=10, vertical=6),
-            content=ft.Row(
+            content=ft.Column(
+                controls=[toolbar, self.batch_progress_text_control, progress_row],
+                spacing=4,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+        )
+
+    def _batch_progress_label(self) -> str:
+        if self.batch_progress_text:
+            return self.batch_progress_text
+        if self.batch_job_running:
+            return "批量任务准备中..."
+        return "最近批量任务已完成，可点“查看明细”确认每个账号结果。"
+
+    def _batch_progress_value(self) -> float | None:
+        if self.batch_progress_total <= 0:
+            return None
+        return max(0.0, min(1.0, self.batch_progress_completed / max(1, self.batch_progress_total)))
+
+    def _batch_progress_panel(self) -> ft.Container:
+        running = bool(self.batch_job_running)
+        self.batch_progress_text_control = ft.Text(
+            self._batch_progress_label(),
+            size=12,
+            color=ft.Colors.PRIMARY if running else ft.Colors.ON_SURFACE_VARIANT,
+            selectable=True,
+        )
+        self.batch_progress_bar_control = ft.ProgressBar(value=self._batch_progress_value(), expand=True)
+        return ft.Container(
+            border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            content=ft.Column(
                 controls=[
-                    ft.Text(f"批量处理：当前列表已选 {selected_visible}/{len(visible_accounts)}，总已选 {selected_total}", size=12, color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.SELECT_ALL, tooltip="全选当前列表", on_click=lambda e: self.run_async(self.select_all_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.CHECKLIST, tooltip="反选当前列表", on_click=lambda e: self.run_async(self.invert_visible_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.CLEAR, tooltip="清空选择", disabled=not selected_total, on_click=lambda e: self.run_async(self.clear_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.REFRESH, tooltip="检测选中", disabled=not selected_total, on_click=lambda e: self.run_async(self.check_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.CLOUD_SYNC, tooltip="同步选中", disabled=not selected_total, on_click=lambda e: self.run_async(self.sync_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.SETTINGS, tooltip="批量设置", disabled=not selected_total, on_click=lambda e: self.run_async(self.show_batch_account_settings_dialog()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.PLAY_ARROW, tooltip="开始监控", disabled=not selected_total, on_click=lambda e: self.run_async(self.start_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.STOP, tooltip="停止监控", disabled=not selected_total, on_click=lambda e: self.run_async(self.stop_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="删除选中", disabled=not selected_total, on_click=lambda e: self.run_async(self.delete_selected_accounts()), icon_color=ft.Colors.PRIMARY),
-                    ft.IconButton(icon=ft.Icons.CLOSE, tooltip="退出批量选择", on_click=lambda e: self.run_async(self.toggle_account_select_mode()), icon_color=ft.Colors.PRIMARY),
+                    self.batch_progress_text_control,
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.HOURGLASS_TOP if running else ft.Icons.INFO_OUTLINE, size=16, color=ft.Colors.PRIMARY),
+                            self.batch_progress_bar_control,
+                            ft.TextButton("查看明细", icon=ft.Icons.LIST_ALT, on_click=lambda e: self.run_async(self.show_batch_result_dialog())),
+                            ft.TextButton("停止任务", icon=ft.Icons.CANCEL, disabled=not running or self.batch_cancel_requested, on_click=lambda e: self.run_async(self.cancel_batch_job())),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ],
-                spacing=6,
-                wrap=True,
+                spacing=4,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
 
@@ -491,11 +714,12 @@ class DouyinContentMonitorPage(PageBase):
                     spacing=6,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                self._inbox_summary_panel(items),
                 ft.Row(
                     controls=[
                         ft.IconButton(
                             icon=ft.Icons.CLOUD_SYNC,
-                            tooltip="同步作品：会请求作品明细，账号多时建议低频使用",
+                            tooltip="同步作品列表：请求作品明细、封面和下载信息",
                             on_click=lambda e: self.run_async(self.sync_all_accounts_on_click()),
                             icon_color=ft.Colors.PRIMARY,
                         ),
@@ -584,7 +808,12 @@ class DouyinContentMonitorPage(PageBase):
         )
 
     def create_main_area(self):
-        return ft.Container(content=self.cards_area, expand=True, bgcolor=ft.Colors.SURFACE, padding=ft.Padding.only(top=4))
+        controls: list[ft.Control] = []
+        if self.account_filter == "error":
+            controls.append(self._error_repair_panel())
+        controls.append(self.cards_area)
+        content: ft.Control = self.cards_area if len(controls) == 1 else ft.Column(controls=controls, spacing=8, expand=True)
+        return ft.Container(content=content, expand=True, bgcolor=ft.Colors.SURFACE, padding=ft.Padding.only(top=4))
 
     async def refresh_view(self):
         if self.cards_area is None or self.history_area is None:
@@ -604,7 +833,10 @@ class DouyinContentMonitorPage(PageBase):
                 pass
             return
         self.cards_area.controls.clear()
+        self.account_checkbox_controls.clear()
         accounts = self._visible_accounts()
+        visible_count = max(1, min(len(accounts), int(self.account_visible_count or self.account_page_size)))
+        visible_accounts = accounts[:visible_count]
         if not accounts:
             empty_text = self._accounts_empty_text()
             self.cards_area.controls.append(
@@ -614,14 +846,47 @@ class DouyinContentMonitorPage(PageBase):
                 )
             )
         else:
-            for account in accounts:
+            self.cards_area.controls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=4, vertical=2),
+                    content=ft.Text(
+                        f"当前显示 {len(visible_accounts)}/{len(accounts)} 个账号；大量账号会分批渲染，减少页面卡顿。",
+                        size=12,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                )
+            )
+            for account in visible_accounts:
                 self.cards_area.controls.append(self.create_account_card(account))
+            if visible_count < len(accounts):
+                self.cards_area.controls.append(
+                    ft.Container(
+                        padding=ft.Padding.only(top=4, bottom=12),
+                        content=ft.Row(
+                            controls=[
+                                ft.OutlinedButton(
+                                    f"加载更多账号（{min(visible_count + self.account_page_size, len(accounts))}/{len(accounts)}）",
+                                    icon=ft.Icons.EXPAND_MORE,
+                                    on_click=lambda e: self.run_async(self.load_more_accounts()),
+                                ),
+                                ft.Text("账号很多时建议先搜索或按分组筛选。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ],
+                            wrap=True,
+                            spacing=8,
+                        ),
+                    )
+                )
         try:
             self.cards_area.update()
         except Exception:
             pass
         if self.view_mode == "accounts":
             await self.restore_pending_account_scroll_position()
+
+    async def load_more_accounts(self):
+        self.account_visible_count = int(self.account_visible_count or self.account_page_size) + self.account_page_size
+        await self.refresh_view()
+        self.safe_content_update()
 
     def _accounts_empty_text(self) -> str:
         if not self.manager.accounts:
@@ -637,6 +902,101 @@ class DouyinContentMonitorPage(PageBase):
         if self.account_search_query or self.account_group_filter != "all":
             return "当前筛选条件下没有匹配账号。"
         return self._.get("empty", "还没有添加抖音主页。")
+
+    def _error_accounts(self) -> list[DouyinMonitorAccount]:
+        return [account for account in self.manager.accounts if account.last_error or "异常" in str(account.status)]
+
+    def _error_bucket(self, account: DouyinMonitorAccount) -> str:
+        text = f"{getattr(account, 'status', '')} {getattr(account, 'last_error', '')}"
+        return self._batch_failure_category(text)
+
+    def _error_summary(self) -> dict[str, int]:
+        summary = {"cookie": 0, "risk_control": 0, "profile": 0, "cancelled": 0, "other": 0}
+        for account in self._error_accounts():
+            bucket = self._error_bucket(account)
+            summary[bucket] = summary.get(bucket, 0) + 1
+        return summary
+
+    def _error_repair_panel(self) -> ft.Control:
+        accounts = self._error_accounts()
+        summary = self._error_summary()
+        label_map = {
+            "cookie": "Cookie/登录态",
+            "risk_control": "风控/限流",
+            "profile": "主页不可访问",
+            "cancelled": "已取消",
+            "other": "其他异常",
+        }
+        chips = [
+            ft.Container(
+                content=ft.Text(f"{label_map.get(key, key)} {count}", size=12),
+                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                border_radius=14,
+                padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            )
+            for key, count in summary.items()
+            if count
+        ]
+        if not chips:
+            chips = [ft.Text("当前没有异常账号。", size=12, color=ft.Colors.ON_SURFACE_VARIANT)]
+        return ft.Container(
+            border=ft.Border.all(1, ft.Colors.ERROR_CONTAINER),
+            border_radius=8,
+            padding=10,
+            bgcolor=ft.Colors.ERROR_CONTAINER,
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.HEALTH_AND_SAFETY, color=ft.Colors.ERROR),
+                            ft.Text("异常修复中心", weight=ft.FontWeight.BOLD),
+                            ft.Text(f"{len(accounts)} 个账号需要处理", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ],
+                        spacing=8,
+                        wrap=True,
+                    ),
+                    ft.Row(controls=chips, spacing=6, wrap=True),
+                    ft.Text("建议先检查 Cookie 和网络；多账号同时失败时，降低并发后再重试。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Row(
+                        controls=[
+                            ft.TextButton("重新检测异常账号", icon=ft.Icons.REFRESH, disabled=not accounts or self.batch_job_running, on_click=lambda e: self.run_async(self.check_error_accounts_on_click())),
+                            ft.TextButton("同步异常账号", icon=ft.Icons.CLOUD_SYNC, disabled=not accounts or self.batch_job_running, on_click=lambda e: self.run_async(self.sync_error_accounts_on_click())),
+                            ft.TextButton("复制异常摘要", icon=ft.Icons.CONTENT_COPY, disabled=not accounts, on_click=lambda e: self.run_async(self.copy_error_summary())),
+                        ],
+                        spacing=6,
+                        wrap=True,
+                    ),
+                ],
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+        )
+
+    def _inbox_summary_panel(self, entries: list[tuple[DouyinMonitorAccount, Any]]) -> ft.Control:
+        total = len(entries)
+        downloaded = len([item for _account, item in entries if getattr(item, "status", "") == "downloaded"])
+        failed = len([item for _account, item in entries if getattr(item, "status", "") == "download_failed"])
+        count_only = len([item for _account, item in entries if self._is_count_only_item(item)])
+        pending = max(0, total - downloaded - failed)
+        return ft.Container(
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=8,
+            padding=10,
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.INBOX, color=ft.Colors.PRIMARY),
+                    ft.Text(f"待处理 {pending}", weight=ft.FontWeight.BOLD),
+                    ft.Text(f"已下载 {downloaded}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"失败 {failed}", size=12, color=ft.Colors.ERROR if failed else ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"数量变化提示 {count_only}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Container(expand=True),
+                    ft.Text("优先处理失败项和数量变化提示；下载后可批量标记已处理。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                ],
+                spacing=10,
+                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
 
     def _filter_accounts(self, accounts: list[DouyinMonitorAccount]) -> list[DouyinMonitorAccount]:
         mode = str(self.account_filter or "all")
@@ -1130,12 +1490,14 @@ class DouyinContentMonitorPage(PageBase):
 
         async def submit(_=None):
             self.account_search_query = (query_field.value or "").strip()
+            self.account_visible_count = self.account_page_size
             await close_dialog()
             await self.refresh_view()
             self.safe_content_update()
 
         async def clear(_=None):
             self.account_search_query = ""
+            self.account_visible_count = self.account_page_size
             await close_dialog()
             await self.refresh_view()
             self.safe_content_update()
@@ -1289,7 +1651,7 @@ class DouyinContentMonitorPage(PageBase):
     async def refresh_on_click(self, _e=None):
         await self.refresh_view()
         self.safe_content_update()
-        await self.app.snack_bar.show_snack_bar("已刷新本地界面；需要请求抖音请使用“检测更新”或“同步作品”。", bgcolor=ft.Colors.PRIMARY, duration=3000)
+        await self.app.snack_bar.show_snack_bar("已刷新本地界面；需要请求抖音请使用“快速检测更新”或“同步作品列表”。", bgcolor=ft.Colors.PRIMARY, duration=3000)
 
     def _monitor_export_dir(self) -> str:
         return os.path.join(self.app.run_path, "downloads", "monitor_exports")
@@ -1415,10 +1777,12 @@ class DouyinContentMonitorPage(PageBase):
 
     async def set_account_filter(self, mode: str):
         self.account_filter = str(mode or "all")
+        self.account_visible_count = self.account_page_size
         await self.render_current_view()
 
     async def set_account_group_filter(self, group: str):
         self.account_group_filter = str(group or "all")
+        self.account_visible_count = self.account_page_size
         await self.render_current_view()
 
     async def set_work_filter(self, mode: str):
@@ -1452,6 +1816,55 @@ class DouyinContentMonitorPage(PageBase):
         self.selected_work_ids.clear()
         self.inbox_visible_count = self.work_page_size
         await self.render_current_view()
+
+    async def open_error_repair_center(self):
+        self.view_mode = "accounts"
+        self.account_filter = "error"
+        self.account_visible_count = self.account_page_size
+        await self.render_current_view()
+
+    async def check_error_accounts_on_click(self):
+        accounts = self._error_accounts()
+        success, failed, _ = await self._run_account_batch(
+            accounts,
+            "重新检测异常账号",
+            "异常修复",
+            lambda account: self.manager.check_account(account.account_id, notify=True),
+        )
+        if success or failed:
+            await self.app.snack_bar.show_snack_bar(
+                f"异常账号检测完成：成功 {success}，失败 {failed}",
+                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
+                duration=5000,
+                show_close_icon=True,
+            )
+
+    async def sync_error_accounts_on_click(self):
+        accounts = self._error_accounts()
+        success, failed, new_total = await self._run_account_batch(
+            accounts,
+            "同步异常账号作品",
+            "异常修复",
+            lambda account: self.manager.sync_account_works(account.account_id),
+        )
+        if success or failed:
+            await self.app.snack_bar.show_snack_bar(
+                f"异常账号同步完成：成功 {success}，失败 {failed}，新增 {new_total}",
+                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
+                duration=5000,
+                show_close_icon=True,
+            )
+
+    async def copy_error_summary(self):
+        accounts = self._error_accounts()
+        if not accounts:
+            await self.app.snack_bar.show_snack_bar("当前没有异常账号", bgcolor=ft.Colors.PRIMARY)
+            return
+        lines = ["异常账号摘要："]
+        for account in accounts[:300]:
+            bucket = self._error_bucket(account)
+            lines.append(f"[{bucket}] {account.display_name or account.douyin_nickname or account.account_id} | {account.homepage_url} | {account.status} | {account.last_error}")
+        await self.copy_text("\n".join(lines))
 
     async def back_to_accounts(self):
         anchor_id = self.return_account_anchor_id or self.selected_account_id
@@ -1535,6 +1948,7 @@ class DouyinContentMonitorPage(PageBase):
             self._sync_account_last_new_count(account)
             await self.manager.persist(force=True)
         await self.render_current_view()
+        await self.app.snack_bar.show_snack_bar("已标记为已处理", bgcolor=ft.Colors.PRIMARY)
 
     async def mark_all_new_items_seen(self):
         pairs = [(account.account_id, item.item_id) for account, item in list(self._new_work_entries())]
@@ -1622,38 +2036,64 @@ class DouyinContentMonitorPage(PageBase):
             self.history_area.update()
 
     async def toggle_account_select_mode(self):
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("批量任务运行中，结束或取消后再退出批量选择", bgcolor=ft.Colors.ERROR)
+            return
         self.account_select_mode = not self.account_select_mode
         if not self.account_select_mode:
             self.selected_account_ids.clear()
         await self.render_current_view()
 
     async def toggle_account_selected(self, account_id: str, selected: bool | None = None):
+        if self.batch_job_running:
+            self._update_account_checkbox_values()
+            await self.app.snack_bar.show_snack_bar("批量任务运行中，暂不能修改选择", bgcolor=ft.Colors.ERROR)
+            return
         should_select = account_id not in self.selected_account_ids if selected is None else selected
         if should_select:
             self.selected_account_ids.add(account_id)
         else:
             self.selected_account_ids.discard(account_id)
-        await self.render_current_view()
+        checkbox = self.account_checkbox_controls.get(account_id)
+        if checkbox is not None:
+            try:
+                checkbox.value = account_id in self.selected_account_ids
+                checkbox.update()
+            except Exception:
+                pass
+        self._update_batch_account_toolbar_fast()
 
     async def select_all_accounts(self):
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("批量任务运行中，暂不能修改选择", bgcolor=ft.Colors.ERROR)
+            return
         account_ids = {account.account_id for account in self._visible_accounts()}
         if self.selected_account_ids >= account_ids and account_ids:
             self.selected_account_ids.difference_update(account_ids)
         else:
             self.selected_account_ids.update(account_ids)
-        await self.render_current_view()
+        self._update_account_checkbox_values()
+        self._update_batch_account_toolbar_fast()
 
     async def invert_visible_accounts(self):
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("批量任务运行中，暂不能修改选择", bgcolor=ft.Colors.ERROR)
+            return
         for account in self._visible_accounts():
             if account.account_id in self.selected_account_ids:
                 self.selected_account_ids.discard(account.account_id)
             else:
                 self.selected_account_ids.add(account.account_id)
-        await self.render_current_view()
+        self._update_account_checkbox_values()
+        self._update_batch_account_toolbar_fast()
 
     async def clear_selected_accounts(self):
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("批量任务运行中，暂不能修改选择", bgcolor=ft.Colors.ERROR)
+            return
         self.selected_account_ids.clear()
-        await self.render_current_view()
+        self._update_account_checkbox_values()
+        self._update_batch_account_toolbar_fast()
 
     def _selected_accounts(self) -> list[DouyinMonitorAccount]:
         selected = set(self.selected_account_ids)
@@ -1664,13 +2104,16 @@ class DouyinContentMonitorPage(PageBase):
         if not accounts:
             await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
             return
-        group_field = ft.TextField(label="统一设置分组", hint_text="留空则不修改分组", width=420)
+        update_group_checkbox = ft.Checkbox(label="修改分组", value=False)
+        update_policy_checkbox = ft.Checkbox(label="修改自动下载策略", value=False)
+        update_notify_checkbox = ft.Checkbox(label="修改通知策略", value=False)
+        group_field = ft.TextField(label="统一设置分组", hint_text="勾选“修改分组”后生效；留空可设为未分组", width=420, disabled=True)
         policy_dropdown = ft.Dropdown(
             label="新增作品自动下载",
-            value="__keep__",
+            value="all",
             width=300,
+            disabled=True,
             options=[
-                ft.dropdown.Option("__keep__", "保持不变"),
                 ft.dropdown.Option("none", "不自动下载"),
                 ft.dropdown.Option("video", "只下载视频"),
                 ft.dropdown.Option("gallery", "只下载图集"),
@@ -1679,65 +2122,139 @@ class DouyinContentMonitorPage(PageBase):
         )
         notify_dropdown = ft.Dropdown(
             label="新作品通知",
-            value="__keep__",
+            value="on",
             width=300,
+            disabled=True,
             options=[
-                ft.dropdown.Option("__keep__", "保持不变"),
                 ft.dropdown.Option("on", "开启通知"),
                 ft.dropdown.Option("off", "关闭通知"),
             ],
         )
 
+        def update_enabled_controls(_=None):
+            group_field.disabled = not bool(update_group_checkbox.value)
+            policy_dropdown.disabled = not bool(update_policy_checkbox.value)
+            notify_dropdown.disabled = not bool(update_notify_checkbox.value)
+            selected_count = sum(1 for item in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox] if item.value)
+            status_text.value = (
+                f"已选择 {selected_count} 项要修改。未勾选的项目保持不变。"
+                if selected_count
+                else "请先勾选要修改的项目，未勾选项目会保持不变。"
+            )
+            try:
+                self.app.dialog_area.update()
+            except Exception:
+                pass
+
+        update_group_checkbox.on_change = update_enabled_controls
+        update_policy_checkbox.on_change = update_enabled_controls
+        update_notify_checkbox.on_change = update_enabled_controls
+
         async def close_dialog(_=None):
             dialog.open = False
             self.app.dialog_area.update()
 
-        async def submit(_=None):
-            group_value = str(group_field.value or "").strip()
-            policy_value = str(policy_dropdown.value or "__keep__")
-            notify_value = str(notify_dropdown.value or "__keep__")
-            changed = 0
-            for account in accounts:
-                ok = await self.manager.update_account_settings(
-                    account.account_id,
-                    group_name=group_value if group_value else None,
-                    auto_download_policy=policy_value if policy_value != "__keep__" else None,
-                    notify_enabled=True if notify_value == "on" else (False if notify_value == "off" else None),
-                )
-                if ok:
-                    changed += 1
-            await close_dialog()
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar(f"已更新 {changed} 个账号设置", bgcolor=ft.Colors.PRIMARY)
+        status_text = ft.Text("请先勾选要修改的项目，未勾选项目会保持不变。", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
+        submitting = False
 
+        async def submit(_=None):
+            nonlocal submitting
+            if submitting:
+                return
+            wants_group = bool(update_group_checkbox.value)
+            wants_policy = bool(update_policy_checkbox.value)
+            wants_notify = bool(update_notify_checkbox.value)
+            if not any([wants_group, wants_policy, wants_notify]):
+                await self.app.snack_bar.show_snack_bar("没有选择要修改的设置", bgcolor=ft.Colors.ERROR)
+                return
+            group_value = str(group_field.value or "").strip()
+            policy_value = str(policy_dropdown.value or "all")
+            notify_value = str(notify_dropdown.value or "on")
+            update_payload = {
+                "group_name": group_value if wants_group else None,
+                "auto_download_policy": policy_value if wants_policy else None,
+                "notify_enabled": (True if notify_value == "on" else False) if wants_notify else None,
+            }
+            submitting = True
+            save_button.disabled = True
+            cancel_button.disabled = True
+            for control in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox, group_field, policy_dropdown, notify_dropdown]:
+                control.disabled = True
+            status_text.value = f"正在批量保存 {len(accounts)} 个账号，请勿重复点击..."
+            try:
+                self.app.dialog_area.update()
+            except Exception:
+                pass
+            try:
+                updater = getattr(self.manager, "update_account_settings_batch", None)
+                if callable(updater):
+                    result = await updater([account.account_id for account in accounts], **update_payload)
+                    updated = int(result.get("updated") or 0) if isinstance(result, dict) else 0
+                    changed = int(result.get("changed") or updated) if isinstance(result, dict) else updated
+                else:
+                    updated = 0
+                    changed = 0
+                    for account in accounts:
+                        ok = await self.manager.update_account_settings(account.account_id, **update_payload)
+                        if ok:
+                            updated += 1
+                            changed += 1
+                await close_dialog()
+                await self.render_current_view()
+                await self.app.snack_bar.show_snack_bar(
+                    f"批量设置已保存：处理 {updated} 个账号，实际变更 {changed} 个",
+                    bgcolor=ft.Colors.PRIMARY,
+                    duration=5000,
+                    show_close_icon=True,
+                )
+            except Exception as exc:
+                submitting = False
+                save_button.disabled = False
+                cancel_button.disabled = False
+                for control in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox]:
+                    control.disabled = False
+                update_enabled_controls()
+                status_text.value = f"保存失败：{exc}"
+                try:
+                    self.app.dialog_area.update()
+                except Exception:
+                    pass
+                await self.app.snack_bar.show_snack_bar(f"批量设置保存失败：{exc}", bgcolor=ft.Colors.ERROR)
+
+        cancel_button = ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=close_dialog)
+        save_button = ft.FilledButton("保存选中修改项", icon=ft.Icons.SAVE, on_click=submit)
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(f"批量设置 {len(accounts)} 个账号"),
             content=ft.Column(
                 controls=[
-                    group_field,
-                    ft.Row([policy_dropdown, notify_dropdown], spacing=10, wrap=True),
-                    ft.IconButton(
-                        icon=ft.Icons.INFO_OUTLINE,
-                        tooltip="空分组表示不修改；需要清空分组时请在单个账号编辑里处理。",
-                        icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                    ft.Text("只会修改已勾选的项目，未勾选项目保持不变，避免误改账号配置。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Row([update_group_checkbox, group_field], spacing=8, wrap=True),
+                    ft.Row([update_policy_checkbox, policy_dropdown], spacing=8, wrap=True),
+                    ft.Row([update_notify_checkbox, notify_dropdown], spacing=8, wrap=True),
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.ON_SURFACE_VARIANT, size=18),
+                            status_text,
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 ],
                 tight=True,
                 spacing=10,
-                width=560,
+                width=620,
             ),
-            actions=[
-                ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=close_dialog),
-                ft.FilledButton("保存", icon=ft.Icons.SAVE, on_click=submit),
-            ],
+            actions=[cancel_button, save_button],
         )
         dialog.open = True
         self.app.dialog_area.content = dialog
         self.app.dialog_area.update()
 
     async def _run_selected_account_job(self, title: str, category: str, job) -> tuple[int, int, int]:
-        accounts = self._selected_accounts()
+        return await self._run_account_batch(self._selected_accounts(), title, category, job)
+
+    async def _run_account_batch(self, accounts: list[DouyinMonitorAccount], title: str, category: str, job) -> tuple[int, int, int]:
         if not accounts:
             await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
             return 0, 0, 0
@@ -1746,56 +2263,117 @@ class DouyinContentMonitorPage(PageBase):
             return 0, 0, 0
         self.batch_job_running = True
         self.batch_cancel_requested = False
+        self.batch_progress_cancelled = False
+        self._set_batch_progress_state(title=title, completed=0, total=len(accounts), success=0, failed=0, new_total=0)
         await self.set_loading(True)
+        await self.render_current_view()
         task_center = getattr(self.app.services, "task_center", None)
         task_id = task_center.start(title, category, total=len(accounts)) if task_center else None
         success = 0
         failed = 0
         new_total = 0
+        completed = 0
         result_lines: list[str] = []
-        last_refresh = 0.0
         cancelled = False
-        try:
-            for index, account in enumerate(accounts, start=1):
+        queue: asyncio.Queue[DouyinMonitorAccount] = asyncio.Queue()
+        for account in accounts:
+            queue.put_nowait(account)
+        progress_lock = asyncio.Lock()
+        last_progress_update = 0.0
+        concurrency = min(self._account_batch_parallel_limit(), max(1, len(accounts)))
+
+        async def publish_progress(current: str = "", *, force: bool = False, final: bool = False) -> None:
+            nonlocal last_progress_update
+            now = time.monotonic()
+            if not force and not final and now - last_progress_update < 0.25:
+                return
+            last_progress_update = now
+            self._set_batch_progress_state(
+                title=title,
+                completed=completed,
+                total=len(accounts),
+                success=success,
+                failed=failed,
+                new_total=new_total,
+                current=current,
+                cancelled=cancelled,
+                final=final,
+            )
+            if task_center and task_id:
+                task_center.progress(
+                    task_id,
+                    completed=completed,
+                    success_count=success,
+                    failed_count=failed,
+                    detail=self.batch_progress_text,
+                )
+            self._update_batch_progress_controls()
+            await asyncio.sleep(0)
+
+        async def worker() -> None:
+            nonlocal success, failed, new_total, completed, cancelled
+            while True:
                 if self.batch_cancel_requested:
                     cancelled = True
-                    result_lines.append("[取消] 用户已取消批量任务")
-                    break
+                    return
+                try:
+                    account = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
                 name = account.display_name or account.douyin_nickname or account.account_id
                 try:
+                    async with progress_lock:
+                        await publish_progress(name, force=True)
                     result = job(account)
                     if inspect.isawaitable(result):
                         result = await result
                     ok = bool(result.get("success")) if isinstance(result, dict) else bool(result)
-                    if ok:
-                        success += 1
-                        reason = str(result.get("reason") or "成功") if isinstance(result, dict) else "成功"
-                        result_lines.append(f"[成功] {name}：{reason}")
-                        if isinstance(result, dict):
-                            try:
-                                new_total += int(result.get("new") or len(result.get("new_items") or []))
-                            except (TypeError, ValueError):
-                                pass
-                    else:
-                        failed += 1
-                        reason = str(result.get("reason") or "失败") if isinstance(result, dict) else "失败"
-                        result_lines.append(f"[失败] {name}：{reason}")
+                    async with progress_lock:
+                        completed += 1
+                        if ok:
+                            success += 1
+                            reason = str(result.get("reason") or "成功") if isinstance(result, dict) else "成功"
+                            result_lines.append(f"[成功] {name}：{reason}")
+                            if isinstance(result, dict):
+                                try:
+                                    new_total += int(result.get("new") or len(result.get("new_items") or []))
+                                except (TypeError, ValueError):
+                                    pass
+                        else:
+                            failed += 1
+                            reason = str(result.get("reason") or "失败") if isinstance(result, dict) else "失败"
+                            result_lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
+                        await publish_progress(name, force=True)
+                except asyncio.CancelledError:
+                    async with progress_lock:
+                        cancelled = True
+                        result_lines.append(f"[取消] {name}：任务已取消")
+                        await publish_progress(name, force=True)
+                    raise
                 except Exception as exc:
-                    failed += 1
-                    result_lines.append(f"[失败] {name}：{exc}")
+                    async with progress_lock:
+                        completed += 1
+                        failed += 1
+                        reason = str(exc) or exc.__class__.__name__
+                        result_lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
+                        await publish_progress(name, force=True)
                     logger.debug(f"{title} failed for account={account.account_id}: {exc}")
-                if task_center and task_id:
-                    task_center.progress(
-                        task_id,
-                        completed=index,
-                        success_count=success,
-                        failed_count=failed,
-                        detail=f"进度：{index}/{len(accounts)}，成功 {success}，失败 {failed}，新增 {new_total}",
-                    )
-                now = time.monotonic()
-                if index == len(accounts) or now - last_refresh >= 0.6:
-                    await self.refresh_view()
-                    last_refresh = now
+                finally:
+                    try:
+                        queue.task_done()
+                    except ValueError:
+                        pass
+
+        workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+        try:
+            await asyncio.gather(*workers)
+            if self.batch_cancel_requested:
+                cancelled = True
+                result_lines.append("[取消] 用户已取消批量任务，未开始的账号已跳过")
+        finally:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
             if task_center and task_id:
                 detail = f"已取消：成功 {success}，失败 {failed}，新增 {new_total}" if cancelled else f"完成：成功 {success}，失败 {failed}，新增 {new_total}"
                 if cancelled and hasattr(task_center, "cancel"):
@@ -1803,20 +2381,32 @@ class DouyinContentMonitorPage(PageBase):
                 else:
                     task_center.finish(task_id, success=(failed == 0 and not cancelled), detail=detail)
             self.batch_result_lines = result_lines[-200:]
-            return success, failed, new_total
-        finally:
+            self._set_batch_progress_state(
+                title=title,
+                completed=completed,
+                total=len(accounts),
+                success=success,
+                failed=failed,
+                new_total=new_total,
+                cancelled=cancelled,
+                final=True,
+            )
             self.batch_job_running = False
             self.batch_cancel_requested = False
+            self._pending_monitor_refresh = False
             await self.set_loading(False)
             await self.render_current_view()
+        return success, failed, new_total
 
     async def cancel_batch_job(self):
         if not self.batch_job_running:
             await self.app.snack_bar.show_snack_bar("当前没有批量任务", bgcolor=ft.Colors.ERROR)
             return
         self.batch_cancel_requested = True
-        await self.render_current_view()
-        await self.app.snack_bar.show_snack_bar("已请求取消，当前账号处理完成后停止", bgcolor=ft.Colors.PRIMARY)
+        self.batch_progress_cancelled = True
+        self._set_batch_progress_state(cancelled=True)
+        self._update_batch_progress_controls()
+        await self.app.snack_bar.show_snack_bar("已请求取消，等待中的账号会跳过，正在请求的账号完成后停止", bgcolor=ft.Colors.PRIMARY)
 
     async def show_batch_result_dialog(self):
         lines = self._latest_batch_result_lines()
@@ -1888,31 +2478,34 @@ class DouyinContentMonitorPage(PageBase):
         )
 
     async def start_selected_accounts(self):
-        if not self.selected_account_ids:
+        accounts = self._selected_accounts()
+        if not accounts:
             await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
+            return
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
             return
         await self.set_loading(True)
         try:
-            total = 0
-            lines = []
-            for account_id in list(self.selected_account_ids):
-                account = self.manager.find_account(account_id)
-                name = (account.display_name or account.douyin_nickname or account_id) if account else account_id
-                if await self.manager.start_monitor(account_id):
-                    total += 1
-                    lines.append(f"[成功] {name}：已开始监控")
-                else:
-                    lines.append(f"[失败] {name}：账号不存在")
-            self.batch_result_lines = lines[-200:]
-            await self.refresh_view()
-            await self.app.snack_bar.show_snack_bar(f"已开始监控 {total} 个账号", bgcolor=ft.Colors.PRIMARY)
+            result = await self.manager.set_monitor_enabled_batch([account.account_id for account in accounts], True)
+            changed = int(result.get("total") or 0) if isinstance(result, dict) else 0
+            self.batch_result_lines = [f"[成功] {account.display_name or account.douyin_nickname or account.account_id}：已开始监控" for account in accounts if account.monitor_enabled][-200:]
+            await self.render_current_view()
+            await self.app.snack_bar.show_snack_bar(
+                f"批量开始监控完成：变更 {changed} 个账号，未变更 {max(0, len(accounts) - changed)} 个",
+                bgcolor=ft.Colors.PRIMARY,
+                duration=5000,
+                show_close_icon=True,
+            )
         finally:
             await self.set_loading(False)
-            await self.render_current_view()
 
     async def stop_selected_accounts(self, confirmed: bool = False):
         if not self.selected_account_ids:
             await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
+            return
+        if self.batch_job_running:
+            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
             return
         if not confirmed:
             count = len(self.selected_account_ids)
@@ -1922,24 +2515,22 @@ class DouyinContentMonitorPage(PageBase):
                 lambda: self.stop_selected_accounts(confirmed=True),
             )
             return
+
+        accounts = self._selected_accounts()
         await self.set_loading(True)
         try:
-            total = 0
-            lines = []
-            for account_id in list(self.selected_account_ids):
-                account = self.manager.find_account(account_id)
-                name = (account.display_name or account.douyin_nickname or account_id) if account else account_id
-                if await self.manager.stop_monitor(account_id):
-                    total += 1
-                    lines.append(f"[成功] {name}：已停止监控")
-                else:
-                    lines.append(f"[失败] {name}：账号不存在")
-            self.batch_result_lines = lines[-200:]
-            await self.refresh_view()
-            await self.app.snack_bar.show_snack_bar(f"已停止监控 {total} 个账号", bgcolor=ft.Colors.PRIMARY)
+            result = await self.manager.set_monitor_enabled_batch([account.account_id for account in accounts], False)
+            changed = int(result.get("total") or 0) if isinstance(result, dict) else 0
+            self.batch_result_lines = [f"[成功] {account.display_name or account.douyin_nickname or account.account_id}：已停止监控" for account in accounts if not account.monitor_enabled][-200:]
+            await self.render_current_view()
+            await self.app.snack_bar.show_snack_bar(
+                f"批量停止监控完成：变更 {changed} 个账号，未变更 {max(0, len(accounts) - changed)} 个",
+                bgcolor=ft.Colors.PRIMARY,
+                duration=5000,
+                show_close_icon=True,
+            )
         finally:
             await self.set_loading(False)
-            await self.render_current_view()
 
     async def check_selected_accounts(self):
         success, failed, _new_total = await self._run_selected_account_job(
@@ -1985,19 +2576,19 @@ class DouyinContentMonitorPage(PageBase):
             return
         await self.set_loading(True)
         try:
-            deleted = 0
             self.recent_deleted_accounts = [account.to_dict() for account in accounts]
             self.deleted_account_batches.append(self.recent_deleted_accounts)
             self.deleted_account_batches = self.deleted_account_batches[-10:]
+            result = await self.manager.delete_accounts_batch([account.account_id for account in accounts])
+            deleted_ids = set(result.get("account_ids") or []) if isinstance(result, dict) else set()
+            deleted = int(result.get("deleted") or len(deleted_ids)) if isinstance(result, dict) else len(deleted_ids)
             lines = []
             for account in accounts:
                 name = account.display_name or account.douyin_nickname or account.account_id
-                ok = await self.manager.delete_account(account.account_id)
-                if ok:
-                    deleted += 1
+                if account.account_id in deleted_ids:
                     lines.append(f"[成功] {name}：已删除，可从恢复按钮找回")
                 else:
-                    lines.append(f"[失败] {name}：删除失败")
+                    lines.append(f"[失败] {name}：删除失败或账号不存在")
             self.batch_result_lines = lines[-200:]
             self.selected_account_ids.clear()
             if self.selected_account_id and not self.manager.find_account(self.selected_account_id):
@@ -2293,8 +2884,62 @@ class DouyinContentMonitorPage(PageBase):
                 duration=5000,
                 show_close_icon=True,
             )
+            if result.get("success") and result.get("path"):
+                self.show_download_complete_dialog(str(result.get("path") or ""), str(result.get("reason") or "下载完成"), result.get("files") or [])
         finally:
             await self.set_loading(False)
+
+    def show_download_complete_dialog(self, path: str, reason: str = "下载完成", files: list[str] | None = None) -> None:
+        target_path = str(path or "").strip()
+        file_count_text = f"\n文件数：{len(files)}" if files else ""
+        dialog_ref: dict[str, ft.AlertDialog | None] = {"dialog": None}
+
+        def close_dialog(_=None):
+            dialog = dialog_ref.get("dialog")
+            if dialog is not None:
+                dialog.open = False
+            self.app.dialog_area.update()
+
+        async def copy_path(_=None):
+            close_dialog()
+            await self.copy_text(target_path)
+
+        async def open_folder(_=None):
+            close_dialog()
+            await self.open_download_location(target_path)
+
+        dialog = ft.AlertDialog(
+            modal=False,
+            title=ft.Text("下载完成"),
+            content=ft.Column(
+                controls=[
+                    ft.Text(reason, size=13),
+                    ft.Text(f"保存位置：{target_path}{file_count_text}", selectable=True, size=12),
+                ],
+                tight=True,
+                width=680,
+            ),
+            actions=[
+                ft.TextButton("关闭", icon=ft.Icons.CLOSE, on_click=close_dialog),
+                ft.TextButton("复制路径", icon=ft.Icons.CONTENT_COPY, on_click=lambda e: self.run_async(copy_path())),
+                ft.FilledButton("打开文件夹", icon=ft.Icons.FOLDER_OPEN, on_click=lambda e: self.run_async(open_folder())),
+            ],
+        )
+        dialog_ref["dialog"] = dialog
+        dialog.open = True
+        self.app.dialog_area.content = dialog
+        self.app.dialog_area.update()
+
+    async def open_download_location(self, path: str) -> None:
+        target = self._download_location(path)
+        await self.open_path_or_url(target, success=f"已打开：{target}", failed_prefix="打开下载位置失败")
+
+    @staticmethod
+    def _download_location(path: str) -> str:
+        text = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+        if os.path.isfile(text):
+            return os.path.dirname(text)
+        return text
 
     async def open_item_download_location(self, item_id: str):
         account_id = self.selected_account_id
@@ -2582,52 +3227,24 @@ class DouyinContentMonitorPage(PageBase):
         if not enabled_accounts:
             await self.app.snack_bar.show_snack_bar("没有启用监控的账号", bgcolor=ft.Colors.ERROR)
             return
-        if self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
-            return
-        self.batch_job_running = True
-        self.batch_cancel_requested = False
-        await self.set_loading(True)
-        task_center = getattr(self.app.services, "task_center", None)
-        task_id = task_center.start("检测全部监控账号", "内容监控", total=len(enabled_accounts)) if task_center else None
-        try:
-            result = await self.manager.check_all_enabled(should_cancel=lambda: self.batch_cancel_requested)
-            results = list(result.get("results") or [])
-            success = len([item for item in results if item.get("success")])
-            failed = len(results) - success
-            lines = []
-            accounts_by_id = {account.account_id: account for account in enabled_accounts}
-            for item in results:
-                account = accounts_by_id.get(str(item.get("account_id") or ""))
-                name = (account.display_name or account.douyin_nickname or account.account_id) if account else str(item.get("account_id") or "账号")
-                if item.get("success"):
-                    lines.append(f"[成功] {name}：{item.get('reason') or '检测完成'}")
-                else:
-                    reason = str(item.get('reason') or '检测失败')
-                    lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
-            if task_center and task_id:
-                task_center.progress(task_id, completed=len(results), success_count=success, failed_count=failed, detail=f"检测完成：成功 {success}，失败 {failed}")
-                task_center.finish(task_id, success=(failed == 0), detail=f"检测完成：成功 {success}，失败 {failed}")
-            self.batch_result_lines = lines[-200:]
+        success, failed, _ = await self._run_account_batch(
+            enabled_accounts,
+            "检测全部监控账号",
+            "内容监控",
+            lambda account: self.manager.check_account(account.account_id, notify=True),
+        )
+        if success or failed:
             await self.app.snack_bar.show_snack_bar(
                 f"检测完成：成功 {success}，失败 {failed}",
                 bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
                 duration=5000,
                 show_close_icon=True,
             )
-        finally:
-            self.batch_job_running = False
-            self.batch_cancel_requested = False
-            await self.set_loading(False)
-            await self.render_current_view()
 
     async def sync_all_accounts_on_click(self, confirmed: bool = False):
         accounts = list(self.manager.accounts)
         if not accounts:
             await self.app.snack_bar.show_snack_bar("没有可同步的账号", bgcolor=ft.Colors.ERROR)
-            return
-        if self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
             return
         if not confirmed:
             self.show_confirm_dialog(
@@ -2636,45 +3253,19 @@ class DouyinContentMonitorPage(PageBase):
                 lambda: self.sync_all_accounts_on_click(confirmed=True),
             )
             return
-        self.batch_job_running = True
-        self.batch_cancel_requested = False
-        await self.set_loading(True)
-        task_center = getattr(self.app.services, "task_center", None)
-        task_id = task_center.start("同步全部账号作品", "作品监控", total=len(accounts)) if task_center else None
-        try:
-            if hasattr(self.manager, "sync_accounts_batch"):
-                result = await self.manager.sync_accounts_batch([account.account_id for account in accounts], should_cancel=lambda: self.batch_cancel_requested)
-            else:
-                result = {"results": [await self.manager.sync_account_works(account.account_id) for account in accounts]}
-            results = list(result.get("results") or [])
-            success = len([item for item in results if item.get("success")])
-            failed = len(results) - success
-            new_total = int(result.get("new_total") or 0)
-            lines = []
-            accounts_by_id = {account.account_id: account for account in accounts}
-            for item in results:
-                account = accounts_by_id.get(str(item.get("account_id") or ""))
-                name = (account.display_name or account.douyin_nickname or account.account_id) if account else str(item.get("account_id") or "账号")
-                if item.get("success"):
-                    lines.append(f"[成功] {name}：{item.get('reason') or '同步完成'}，新增 {item.get('new') or 0}")
-                else:
-                    reason = str(item.get('reason') or '同步失败')
-                    lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
-            if task_center and task_id:
-                task_center.progress(task_id, completed=len(results), success_count=success, failed_count=failed, detail=f"同步完成：成功 {success}，失败 {failed}，新增 {new_total}")
-                task_center.finish(task_id, success=(failed == 0), detail=f"同步完成：成功 {success}，失败 {failed}，新增 {new_total}")
-            self.batch_result_lines = lines[-200:]
+        success, failed, new_total = await self._run_account_batch(
+            accounts,
+            "同步全部账号作品",
+            "作品监控",
+            lambda account: self.manager.sync_account_works(account.account_id),
+        )
+        if success or failed:
             await self.app.snack_bar.show_snack_bar(
                 f"同步完成：成功 {success}，失败 {failed}，新增 {new_total}",
                 bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
                 duration=5000,
                 show_close_icon=True,
             )
-        finally:
-            self.batch_job_running = False
-            self.batch_cancel_requested = False
-            await self.set_loading(False)
-            await self.render_current_view()
 
     async def batch_start_on_click(self, _e=None):
         await self.set_loading(True)
@@ -2764,10 +3355,19 @@ class DouyinContentMonitorPage(PageBase):
     async def subscribe_update(self, *_args: Any):
         if getattr(self.app, "current_page_name", "") != self.page_name:
             return
+        if self.batch_job_running or self.download_in_progress:
+            self._pending_monitor_refresh = True
+            return
+        now = time.monotonic()
+        if now - self._last_pubsub_refresh_at < 0.8:
+            self._pending_monitor_refresh = True
+            return
+        self._last_pubsub_refresh_at = now
         try:
             await self.refresh_view()
             self.safe_content_update()
             if self.view_mode == "accounts":
                 await self.restore_pending_account_scroll_position()
+            self._pending_monitor_refresh = False
         except Exception as exc:
             logger.debug(f"douyin monitor subscribe refresh failed: {exc}")

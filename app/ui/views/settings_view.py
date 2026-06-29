@@ -47,6 +47,7 @@ class SettingsPage(PageBase):
         self.batch_download_concurrency_field: ft.TextField | None = None
         self.download_chunk_size_field: ft.TextField | None = None
         self.gallery_image_concurrency_field: ft.TextField | None = None
+        self.gallery_image_save_format_dropdown: ft.Dropdown | None = None
         self.cookie_cooldown_field: ft.TextField | None = None
         self.incremental_pages_field: ft.TextField | None = None
         self.segmented_parts_field: ft.TextField | None = None
@@ -172,6 +173,17 @@ class SettingsPage(PageBase):
         self.batch_download_concurrency_field = ft.TextField(label="批量下载并发", value=str(user_config.get("batch_download_concurrency", settings.default_config.get("batch_download_concurrency", 3))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
         self.download_chunk_size_field = ft.TextField(label="下载块 KB", value=str(user_config.get("download_chunk_size_kb", settings.default_config.get("download_chunk_size_kb", 512))), width=140, keyboard_type=ft.KeyboardType.NUMBER)
         self.gallery_image_concurrency_field = ft.TextField(label="图集图片并发", value=str(user_config.get("gallery_image_concurrency", settings.default_config.get("gallery_image_concurrency", 4))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
+        self.gallery_image_save_format_dropdown = ft.Dropdown(
+            label="图集保存格式",
+            value=str(user_config.get("gallery_image_save_format") or settings.default_config.get("gallery_image_save_format", "original")),
+            width=180,
+            options=[
+                ft.dropdown.Option("original", "保留原格式"),
+                ft.dropdown.Option("png", "统一转 PNG"),
+            ],
+        )
+        if self.gallery_image_save_format_dropdown.value not in {"original", "png"}:
+            self.gallery_image_save_format_dropdown.value = "original"
         self.cookie_cooldown_field = ft.TextField(label="Cookie 冷却秒", value=str(user_config.get("douyin_cookie_cooldown_seconds", settings.default_config.get("douyin_cookie_cooldown_seconds", 600))), width=150, keyboard_type=ft.KeyboardType.NUMBER)
         self.incremental_pages_field = ft.TextField(label="增量页数", value=str(user_config.get("douyin_monitor_incremental_pages", settings.default_config.get("douyin_monitor_incremental_pages", 3))), width=130, keyboard_type=ft.KeyboardType.NUMBER)
         self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", settings.default_config.get("segmented_download_parts", 4))), width=110, keyboard_type=ft.KeyboardType.NUMBER)
@@ -353,7 +365,7 @@ class SettingsPage(PageBase):
                     "性能与批量",
                     [
                         ft.Text("根据账号数量、Cookie 质量和网络环境调整；过高并发会增加风控概率。开发阶段可临时跳过冷却、限速和退避。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
+                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field, self.gallery_image_save_format_dropdown], spacing=8, wrap=True),
                         ft.Row([self.download_chunk_size_field, self.cookie_cooldown_field, self.incremental_pages_field], spacing=8, wrap=True),
                         ft.Container(
                             content=ft.Column([
@@ -519,6 +531,11 @@ class SettingsPage(PageBase):
         self.batch_download_concurrency_field = ft.TextField(label="批量下载并发", value=str(user_config.get("batch_download_concurrency", 3)), keyboard_type=ft.KeyboardType.NUMBER)
         self.download_chunk_size_field = ft.TextField(label="下载块 KB", value=str(user_config.get("download_chunk_size_kb", 512)), keyboard_type=ft.KeyboardType.NUMBER)
         self.gallery_image_concurrency_field = ft.TextField(label="图集图片并发", value=str(user_config.get("gallery_image_concurrency", 4)), keyboard_type=ft.KeyboardType.NUMBER)
+        self.gallery_image_save_format_dropdown = ft.Dropdown(
+            label="图集保存格式",
+            value=str(user_config.get("gallery_image_save_format") or "original"),
+            options=[ft.dropdown.Option("original", "保留原格式"), ft.dropdown.Option("png", "统一转 PNG")],
+        )
         self.cookie_cooldown_field = ft.TextField(label="Cookie 冷却秒", value=str(user_config.get("douyin_cookie_cooldown_seconds", 600)), keyboard_type=ft.KeyboardType.NUMBER)
         self.incremental_pages_field = ft.TextField(label="增量页数", value=str(user_config.get("douyin_monitor_incremental_pages", 3)), keyboard_type=ft.KeyboardType.NUMBER)
         self.segmented_parts_field = ft.TextField(label="分片数", value=str(user_config.get("segmented_download_parts", 4)), keyboard_type=ft.KeyboardType.NUMBER)
@@ -583,7 +600,7 @@ class SettingsPage(PageBase):
                             spacing=8,
                             wrap=True,
                         ),
-                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field], spacing=8, wrap=True),
+                        ft.Row([self.monitor_batch_concurrency_field, self.batch_parse_size_field, self.batch_download_concurrency_field, self.gallery_image_concurrency_field, self.gallery_image_save_format_dropdown], spacing=8, wrap=True),
                         ft.Row([self.development_bypass_switch, self.monitor_fast_switch, self.global_rate_limiter_switch, self.cookie_cooldown_enabled_switch, self.risk_backoff_switch, self.cookie_health_persistence_switch], spacing=8, wrap=True),
                         ft.Row([self.pipeline_download_switch, self.segmented_download_switch], spacing=8, wrap=True),
                         self.monitor_interval_field,
@@ -1334,6 +1351,9 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         cookie_health_persistence_enabled = read_bool_switch(self.cookie_health_persistence_switch, True)
         pipeline_download_enabled = read_bool_switch(self.pipeline_download_switch, False)
         segmented_download_enabled = read_bool_switch(self.segmented_download_switch, False)
+        gallery_image_save_format = str((self.gallery_image_save_format_dropdown.value if self.gallery_image_save_format_dropdown else "") or user_config.get("gallery_image_save_format") or "original")
+        if gallery_image_save_format not in {"original", "png"}:
+            gallery_image_save_format = "original"
 
         download_strategy = str((self.download_strategy_dropdown.value if self.download_strategy_dropdown else "") or user_config.get("download_strategy_preset") or "standard")
         if download_strategy not in self.DOWNLOAD_STRATEGIES:
@@ -1351,6 +1371,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         user_config["batch_download_concurrency"] = batch_download_concurrency
         user_config["download_chunk_size_kb"] = download_chunk_size_kb
         user_config["gallery_image_concurrency"] = gallery_image_concurrency
+        user_config["gallery_image_save_format"] = gallery_image_save_format
         user_config["douyin_cookie_cooldown_seconds"] = cookie_cooldown_seconds
         user_config["douyin_monitor_incremental_pages"] = incremental_pages
         user_config["segmented_download_parts"] = segmented_parts
@@ -1421,9 +1442,13 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
                 if hasattr(parser, "configure_cookie_pool"):
                     parser.configure_cookie_pool("douyin", douyin_cookie_pool)
                     parser.configure_cookie_pool("tiktok", [tiktok_cookie] if tiktok_cookie else [])
+                    if hasattr(parser, "clear_parse_cache"):
+                        parser.clear_parse_cache(failures_only=True)
                 elif hasattr(parser, "update_cookie"):
                     parser.update_cookie("douyin", douyin_cookie)
                     parser.update_cookie("tiktok", tiktok_cookie)
+                    if hasattr(parser, "clear_parse_cache"):
+                        parser.clear_parse_cache(failures_only=True)
             except Exception as exc:
                 cookie_sync_warnings.append(f"parser: {exc}")
                 logger.debug(f"sync cookies to parser failed: {exc}; " + "sync {platform} cookie to parser failed")

@@ -409,7 +409,31 @@ class ContentMonitorProfileSyncMixin:
         previous = account.aweme_count if account.aweme_count >= 0 else account.last_aweme_count
         if previous < 0 or previous != aweme_count:
             return False
-        return bool(account.items or account.known_item_ids)
+        if not bool(account.items or account.known_item_ids):
+            return False
+        every = self._fast_full_sync_every()
+        if every > 0 and self._consecutive_fast_no_change_count(account) >= every:
+            return False
+        return True
+
+    def _fast_full_sync_every(self) -> int:
+        try:
+            value = int(self.settings.user_config.get("douyin_monitor_fast_full_sync_every", 6) or 6)
+        except (TypeError, ValueError):
+            value = 6
+        # 0 disables the forced full-sync guard.
+        return max(0, min(100, value))
+
+    @staticmethod
+    def _consecutive_fast_no_change_count(account: DouyinMonitorAccount) -> int:
+        count = 0
+        for item in reversed(list(getattr(account, "monitor_history", []) or [])):
+            detail = str(item.get("detail", "") if isinstance(item, dict) else "")
+            if "快速检测" in detail and "无更新" in detail:
+                count += 1
+                continue
+            break
+        return count
 
     def _incremental_parser_pages(self, account: DouyinMonitorAccount, aweme_count: int) -> int | None:
         if not self._fast_monitor_enabled() or aweme_count < 0:
@@ -437,7 +461,9 @@ class ContentMonitorProfileSyncMixin:
         account.aweme_count = aweme_count
         account.last_aweme_count = aweme_count
         account.last_new_count = 0
-        account.status = "无更新（快速检测）"
+        every = self._fast_full_sync_every()
+        count = self._consecutive_fast_no_change_count(account) + 1
+        account.status = f"无更新（快速检测 {count}/{every}）" if every > 0 else "无更新（快速检测）"
         self._refresh_account_new_count(account)
         self._record_monitor_history(account, True, account.status, 0)
         await self.persist()

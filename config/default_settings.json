@@ -59,5 +59,7 @@
     "auto_update_manifest_url": "",
     "auto_update_channel": "stable",
     "auto_update_silent_install": false,
-    "auto_update_install_kind": "installer"
+    "auto_update_install_kind": "installer",
+    "douyin_monitor_fast_full_sync_every": 6,
+    "gallery_image_save_format": "original"
 }

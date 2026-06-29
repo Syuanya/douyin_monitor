@@ -61,23 +61,35 @@ class ParserRuntimeMixin:
                     )
 
             tasks = [asyncio.create_task(parse_one(url)) for url in chunk]
-            for task in asyncio.as_completed(tasks):
-                item = await task
-                completed += 1
-                if isinstance(item, ParsedVideoResult):
-                    success_count += 1
-                else:
-                    failed_count += 1
-                yield item
-                yield ParseProgress(
-                    source_url=getattr(item, "source_url", ""),
-                    total=total,
-                    completed=completed,
-                    success_count=success_count,
-                    failed_count=failed_count,
-                    status="running" if completed < total else "completed",
-                    message=f"解析进度：{completed}/{total}，成功 {success_count}，失败 {failed_count}",
-                )
+            try:
+                for task in asyncio.as_completed(tasks):
+                    item = await task
+                    completed += 1
+                    if isinstance(item, ParsedVideoResult):
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                    yield item
+                    yield ParseProgress(
+                        source_url=getattr(item, "source_url", ""),
+                        total=total,
+                        completed=completed,
+                        success_count=success_count,
+                        failed_count=failed_count,
+                        status="running" if completed < total else "completed",
+                        message=f"解析进度：{completed}/{total}，成功 {success_count}，失败 {failed_count}",
+                    )
+            except asyncio.CancelledError:
+                for pending in tasks:
+                    if not pending.done():
+                        pending.cancel()
+                raise
+            finally:
+                pending_tasks = [pending for pending in tasks if not pending.done()]
+                for pending in pending_tasks:
+                    pending.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
     async def parse_text_download_stream(
@@ -123,21 +135,31 @@ class ParserRuntimeMixin:
                         reason=str(exc) or exc.__class__.__name__,
                     )
 
-        async for event in self.parse_text_stream(text, concurrency=concurrency, batch_size=batch_size):
-            yield event
-            if isinstance(event, ParsedVideoResult):
-                yield ParseDownloadEvent(event.source_url, event.item_id, status="queued", reason="已加入下载队列")
-                task = asyncio.create_task(run_download(event))
-                download_tasks.add(task)
-                completed_now = [task for task in list(download_tasks) if task.done()]
-                for done_task in completed_now:
-                    download_tasks.discard(done_task)
-                    yield done_task.result()
-        while download_tasks:
-            done, _pending = await asyncio.wait(download_tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                download_tasks.discard(task)
-                yield task.result()
+        try:
+            async for event in self.parse_text_stream(text, concurrency=concurrency, batch_size=batch_size):
+                yield event
+                if isinstance(event, ParsedVideoResult):
+                    yield ParseDownloadEvent(event.source_url, event.item_id, status="queued", reason="已加入下载队列")
+                    task = asyncio.create_task(run_download(event))
+                    download_tasks.add(task)
+                    completed_now = [task for task in list(download_tasks) if task.done()]
+                    for done_task in completed_now:
+                        download_tasks.discard(done_task)
+                        yield done_task.result()
+            while download_tasks:
+                done, _pending = await asyncio.wait(download_tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    download_tasks.discard(task)
+                    yield task.result()
+        except asyncio.CancelledError:
+            self.cancel_parse_tasks()
+            raise
+        finally:
+            pending_downloads = [task for task in download_tasks if not task.done()]
+            for task in pending_downloads:
+                task.cancel()
+            if pending_downloads:
+                await asyncio.gather(*pending_downloads, return_exceptions=True)
 
     def _parse_batch_size(self) -> int:
         try:
@@ -176,6 +198,32 @@ class ParserRuntimeMixin:
         finally:
             if self._inflight_parses.get(task_key) is task:
                 self._inflight_parses.pop(task_key, None)
+
+
+    def clear_parse_cache(self, url: str | None = None, *, failures_only: bool = False) -> int:
+        if not url:
+            if not failures_only:
+                cleared = len(self._parse_cache)
+                self._parse_cache.clear()
+                return cleared
+            keys = [key for key, value in self._parse_cache.items() if dict(value[1]).get("__negative_cache__")]
+        else:
+            key_url = normalize_work_url(url) or str(url or "").strip()
+            keys = [key_url]
+        cleared = 0
+        for key in keys:
+            if key in self._parse_cache:
+                self._parse_cache.pop(key, None)
+                cleared += 1
+        return cleared
+
+    def cancel_parse_tasks(self) -> int:
+        cancelled = 0
+        for task in list(getattr(self, "_inflight_parses", {}).values()):
+            if task is not None and not task.done():
+                task.cancel()
+                cancelled += 1
+        return cancelled
 
     def _negative_cache_ttl(self, reason: str) -> float:
         lowered = str(reason or "").lower()
