@@ -5,6 +5,30 @@ import flet as ft
 from ..components.common.safe_icons import icon
 
 
+def _avatar_box(url, fallback_label: str = "") -> ft.Container:
+    image_url = str(url or "").strip()
+    fallback_text = str(fallback_label or "").strip()[:1]
+    fallback = (
+        ft.Text(fallback_text, size=14, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY)
+        if fallback_text
+        else ft.Icon(ft.Icons.PERSON, size=20, color=ft.Colors.PRIMARY)
+    )
+    return ft.Container(
+        width=40,
+        height=40,
+        border_radius=20,
+        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+        border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+        alignment=ft.Alignment(0, 0),
+        content=(
+            ft.Image(src=image_url, width=40, height=40, fit=ft.BoxFit.COVER)
+            if image_url
+            else fallback
+        ),
+    )
+
+
 def build_account_card(view, account):
     """Build an account card for the Douyin content page.
 
@@ -14,19 +38,12 @@ def build_account_card(view, account):
 
     status_meta = view.account_status_meta(account)
     status_color = status_meta["color"]
-    avatar_control = ft.Container(
-        width=36,
-        height=36,
-        border_radius=18,
-        clip_behavior=ft.ClipBehavior.HARD_EDGE,
-        content=(
-            ft.Image(src=account.avatar_url, width=36, height=36, fit=ft.BoxFit.COVER)
-            if account.avatar_url
-            else ft.Icon(ft.Icons.PERSON, color=ft.Colors.PRIMARY)
-        ),
-        on_click=lambda e, account_id=account.account_id: view.run_async(view.open_account_works(account_id)),
-        tooltip=view._.get("select", "查看历史"),
+    avatar_control = _avatar_box(
+        getattr(account, "avatar_url", ""),
+        account.display_name or account.douyin_nickname or "",
     )
+    avatar_control.on_click = lambda e, account_id=account.account_id: view.run_async(view.open_account_works(account_id))
+    avatar_control.tooltip = view._.get("select", "查看历史")
     account_checkbox = ft.Checkbox(
         value=account.account_id in view.selected_account_ids,
         visible=view.account_select_mode,

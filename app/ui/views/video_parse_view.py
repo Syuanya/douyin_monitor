@@ -36,9 +36,8 @@ class VideoParsePage(PageBase):
         self.last_result: VideoParseBatchResult | None = None
         self.result_controls: list[ft.Control] = []
         self.result_render_limit = 80
-        # 结果列表固定为纯文本模式：不在列表内渲染远程图片、视频或占位预览。
-        # 这样可以彻底避开部分 Flet/WebView2 环境中媒体控件渲染成大块灰色的问题。
-        self.result_list_text_only = True
+        # 结果列表使用安全媒体卡片：图片/视频封面只在固定尺寸容器内显示。
+        self.result_list_text_only = False
         self.show_all_results = False
         self.result_filter = "all"
         self.result_sort = "input"
@@ -527,8 +526,8 @@ class VideoParsePage(PageBase):
                     bgcolor=ft.Colors.SURFACE,
                     content=ft.Row(
                         controls=[
-                            ft.Icon(ft.Icons.VIEW_LIST, size=16, color=ft.Colors.PRIMARY),
-                            ft.Text("结果列表：纯文本模式，不在列表内加载缩略图；点击预览按钮再打开视频/图集。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ft.Icon(ft.Icons.VIEW_MODULE, size=16, color=ft.Colors.PRIMARY),
+                            ft.Text("结果卡片：已恢复封面/预览位显示；图片固定尺寸加载，避免撑出灰色大块。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                         ],
                         spacing=6,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -921,13 +920,78 @@ class VideoParsePage(PageBase):
         if self.last_result:
             self.render_result(self.last_result)
 
-    def create_result_card(self, item: ParsedVideoResult, order_label: str = "", display_index: int = 0) -> ft.Container:
-        """Create a lightweight text-first result card.
+    def _result_cover_url(self, item: ParsedVideoResult) -> str:
+        image_urls = item.image_urls or item.watermark_image_urls or []
+        if image_urls:
+            return str(image_urls[0] or "")
+        raw = item.raw_data if isinstance(item.raw_data, dict) else {}
+        candidates: list[Any] = []
+        for key in ("cover", "cover_url", "origin_cover", "dynamic_cover"):
+            candidates.append(raw.get(key))
+        for nested_key in ("video_data", "image_data", "video", "images"):
+            nested = raw.get(nested_key)
+            if isinstance(nested, dict):
+                for key in ("cover", "cover_url", "origin_cover", "dynamic_cover"):
+                    candidates.append(nested.get(key))
+        for value in candidates:
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+            if isinstance(value, list):
+                for item_value in value:
+                    if isinstance(item_value, str) and item_value.startswith(("http://", "https://")):
+                        return item_value
+                    if isinstance(item_value, dict):
+                        url = item_value.get("url") or item_value.get("uri")
+                        if isinstance(url, str) and url.startswith(("http://", "https://")):
+                            return url
+            if isinstance(value, dict):
+                for key in ("url", "uri"):
+                    url = value.get(key)
+                    if isinstance(url, str) and url.startswith(("http://", "https://")):
+                        return url
+        return ""
 
-        Do not render inline remote images or placeholder preview panes here. In the
-        Windows/Flet desktop runtime, failed image/video placeholders can expand into
-        a large grey block and hide the parsed content. Preview remains available via
-        explicit buttons so the result list stays stable.
+    def _result_media_box(self, item: ParsedVideoResult) -> ft.Container:
+        """Create a bounded media preview that cannot expand over the result card.
+
+        This intentionally follows the older stable card layout: the media area is
+        small and fixed, and it never uses expand/stretch/selectable long text.
+        Some Windows WebView2/Flet builds render expanded columns or media boxes
+        as a large grey rectangle, so the preview must stay isolated.
+        """
+        image_urls = item.image_urls or item.watermark_image_urls or []
+        is_gallery = item.media_type == "image" or bool(image_urls)
+        cover_url = self._result_cover_url(item)
+        icon_name = ft.Icons.IMAGE_OUTLINED if is_gallery else ft.Icons.PLAY_ARROW
+        fallback = ft.Container(
+            width=120,
+            height=150,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            alignment=ft.Alignment(0, 0),
+            content=ft.Icon(icon_name, size=42, color=ft.Colors.TEAL),
+        )
+        content: ft.Control
+        if cover_url:
+            content = ft.Image(src=cover_url, width=120, height=150, fit=ft.BoxFit.COVER)
+        else:
+            content = fallback
+        return ft.Container(
+            width=120,
+            height=150,
+            border_radius=8,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            alignment=ft.Alignment(0, 0),
+            content=content,
+        )
+
+    def create_result_card(self, item: ParsedVideoResult, order_label: str = "", display_index: int = 0) -> ft.Container:
+        """Create a stable visual result card.
+
+        The right side deliberately does not use expand=True. The previous card
+        used an expanded Column/Text next to the media box; on the user's Windows
+        desktop runtime that expanded region was painted as a huge grey block.
         """
         item_key = self._result_key(item)
         image_urls = item.image_urls or item.watermark_image_urls or []
@@ -936,73 +1000,43 @@ class VideoParsePage(PageBase):
         can_download = bool(item.primary_media_url or image_urls)
         title = item.description or item.item_id or "未命名作品"
         title_prefix = f"{order_label} · " if order_label else ""
+        is_gallery = item.media_type == "image" or bool(image_urls)
 
-        details: list[ft.Control] = [
-            ft.Text(f"作品 ID：{item.item_id or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-            ft.Text(f"作者：{item.author_nickname or '-'}  {item.author_id or ''}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+        detail_controls: list[ft.Control] = [
+            ft.Text(f"作品 ID：{item.item_id or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(f"作者：{item.author_nickname or '-'}  {item.author_id or ''}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(self._short_url(work_url, 110) if work_url else "未获取到作品链接", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
         ]
-        if item.media_type == "image" or image_urls:
-            details.append(ft.Text(f"图集图片：{len(image_urls)} 张", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
+        if is_gallery:
+            detail_controls.append(ft.Text(f"图集图片：{len(image_urls)} 张", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
         elif item.media_type == "video":
             quality_hint = "无水印" if item.no_watermark_url else ("有水印" if item.watermark_url else "未获取到直链")
-            details.append(ft.Text(f"视频状态：{quality_hint}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
-
-        link_lines: list[ft.Control] = [
-            ft.Text(
-                f"作品链接：{self._short_url(work_url, 120) if work_url else '未获取到作品链接'}",
-                size=12,
-                color=ft.Colors.ON_SURFACE_VARIANT,
-                max_lines=2,
-                overflow=ft.TextOverflow.ELLIPSIS,
-            )
-        ]
-        if direct_url:
-            link_lines.append(
-                ft.Text(
-                    f"媒体直链：{self._short_url(direct_url, 120)}",
-                    size=12,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                    max_lines=1,
-                    overflow=ft.TextOverflow.ELLIPSIS,
-                )
-            )
+            detail_controls.append(ft.Text(f"视频状态：{quality_hint}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
 
         actions: list[ft.Control] = [
-            ft.OutlinedButton("打开原作品", icon=ft.Icons.OPEN_IN_NEW, on_click=lambda e, url=work_url: self.run_async(self.open_url(url))),
+            ft.IconButton(icon=ft.Icons.OPEN_IN_NEW, tooltip="打开原作品", icon_color=ft.Colors.PRIMARY, on_click=lambda e, url=work_url: self.run_async(self.open_url(url))),
         ]
         if direct_url:
-            actions.append(ft.OutlinedButton("复制直链", icon=ft.Icons.CONTENT_COPY, on_click=lambda e, url=direct_url: self.run_async(self.copy_text(url))))
+            actions.append(ft.IconButton(icon=ft.Icons.CONTENT_COPY, tooltip="复制直链", icon_color=ft.Colors.PRIMARY, on_click=lambda e, url=direct_url: self.run_async(self.copy_text(url))))
         if can_download:
-            actions.append(ft.FilledButton("下载", icon=ft.Icons.DOWNLOAD, on_click=lambda e, parsed_item=item: self.run_async(self.download_result(parsed_item))))
+            actions.append(ft.IconButton(icon=ft.Icons.DOWNLOAD, tooltip="下载", icon_color=ft.Colors.PRIMARY, on_click=lambda e, parsed_item=item: self.run_async(self.download_result(parsed_item))))
         if item.media_type == "video" and direct_url:
-            actions.append(
-                ft.OutlinedButton(
-                    "预览视频",
-                    icon=ft.Icons.PLAY_CIRCLE,
-                    on_click=lambda e, url=direct_url, source=item.source_url: self.run_async(self.preview_video(url, source)),
-                )
-            )
-        if (item.media_type == "image" or image_urls) and image_urls:
-            actions.append(
-                ft.OutlinedButton(
-                    "预览图集",
-                    icon=ft.Icons.IMAGE_SEARCH,
-                    on_click=lambda e, parsed_item=item: self.run_async(self.preview_images(parsed_item)),
-                )
-            )
+            actions.append(ft.IconButton(icon=ft.Icons.PLAY_CIRCLE, tooltip="预览视频", icon_color=ft.Colors.PRIMARY, on_click=lambda e, url=direct_url, source=item.source_url: self.run_async(self.preview_video(url, source))))
+        if is_gallery and image_urls:
+            actions.append(ft.IconButton(icon=ft.Icons.IMAGE_SEARCH, tooltip="预览图集", icon_color=ft.Colors.PRIMARY, on_click=lambda e, parsed_item=item: self.run_async(self.preview_images(parsed_item))))
 
-        header_controls: list[ft.Control] = []
+        title_row_controls: list[ft.Control] = []
         if self.result_select_mode:
-            header_controls.append(
+            title_row_controls.append(
                 ft.Checkbox(
                     value=item_key in self.selected_result_keys,
                     tooltip="选择此结果",
                     on_change=lambda e, key=item_key: self.toggle_result_selection(key, bool(e.control.value)),
                 )
             )
-        header_controls.extend(
+        title_row_controls.extend(
             [
-                ft.Text(f"{title_prefix}{title}", weight=ft.FontWeight.BOLD, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Text(f"{title_prefix}{title}", weight=ft.FontWeight.BOLD, size=14, max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
                 ft.Container(
                     bgcolor=ft.Colors.TEAL_50,
                     border_radius=6,
@@ -1012,25 +1046,24 @@ class VideoParsePage(PageBase):
             ]
         )
 
+        info_column = ft.Column(
+            controls=[
+                ft.Row(controls=title_row_controls, wrap=True, vertical_alignment=ft.CrossAxisAlignment.START),
+                *detail_controls,
+                ft.Row(controls=actions, wrap=True, spacing=8),
+            ],
+            spacing=7,
+        )
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=8,
             padding=12,
             bgcolor=ft.Colors.SURFACE,
-            # 严禁在结果卡片里加入 图片控件、视频控件或媒体占位容器。
-            # 媒体控件只能在 preview_video/preview_images 的弹窗中按需加载。
-            content=ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=header_controls,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    *details,
-                    *link_lines,
-                    ft.Row(controls=actions, wrap=True, spacing=8),
-                ],
-                spacing=6,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            content=ft.Row(
+                controls=[self._result_media_box(item), info_column],
+                spacing=12,
+                wrap=False,
+                vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         )
 

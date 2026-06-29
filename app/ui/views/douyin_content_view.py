@@ -75,7 +75,7 @@ class DouyinContentMonitorPage(PageBase):
         self.batch_progress_title = ""
         self.batch_selection_text_control: ft.Text | None = None
         self.batch_progress_text_control: ft.Text | None = None
-        self.batch_progress_bar_control: ft.ProgressBar | None = None
+        self.batch_progress_bar_control: ft.Text | None = None
         self.batch_toolbar_buttons: dict[str, ft.Control] = {}
         self.account_checkbox_controls: dict[str, ft.Checkbox] = {}
         self.batch_import_picker: ft.FilePicker | None = None
@@ -527,10 +527,11 @@ class DouyinContentMonitorPage(PageBase):
             selectable=True,
             visible=bool(self.batch_progress_text or running),
         )
-        self.batch_progress_bar_control = ft.ProgressBar(
-            value=self._batch_progress_value(),
+        self.batch_progress_bar_control = ft.Text(
+            self._batch_progress_percent_text(),
+            size=12,
+            color=ft.Colors.PRIMARY if running else ft.Colors.ON_SURFACE_VARIANT,
             visible=bool(self.batch_progress_text or running),
-            expand=True,
         )
 
         def button(name: str, control: ft.Control) -> ft.Control:
@@ -589,6 +590,12 @@ class DouyinContentMonitorPage(PageBase):
             return None
         return max(0.0, min(1.0, self.batch_progress_completed / max(1, self.batch_progress_total)))
 
+    def _batch_progress_percent_text(self) -> str:
+        if self.batch_progress_total <= 0:
+            return "进度：准备中"
+        pct = int(round((self.batch_progress_completed / max(1, self.batch_progress_total)) * 100))
+        return f"进度：{self.batch_progress_completed}/{self.batch_progress_total}（{pct}%）"
+
     def _batch_progress_panel(self) -> ft.Container:
         running = bool(self.batch_job_running)
         self.batch_progress_text_control = ft.Text(
@@ -597,7 +604,11 @@ class DouyinContentMonitorPage(PageBase):
             color=ft.Colors.PRIMARY if running else ft.Colors.ON_SURFACE_VARIANT,
             selectable=True,
         )
-        self.batch_progress_bar_control = ft.ProgressBar(value=self._batch_progress_value(), expand=True)
+        self.batch_progress_bar_control = ft.Text(
+            self._batch_progress_percent_text(),
+            size=12,
+            color=ft.Colors.PRIMARY if running else ft.Colors.ON_SURFACE_VARIANT,
+        )
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
             border_radius=8,
@@ -989,7 +1000,6 @@ class DouyinContentMonitorPage(PageBase):
                     ft.Text(f"已下载 {downloaded}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                     ft.Text(f"失败 {failed}", size=12, color=ft.Colors.ERROR if failed else ft.Colors.ON_SURFACE_VARIANT),
                     ft.Text(f"数量变化提示 {count_only}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Container(expand=True),
                     ft.Text("优先处理失败项和数量变化提示；下载后可批量标记已处理。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ],
                 spacing=10,
