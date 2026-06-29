@@ -23,15 +23,18 @@ def test_content_monitor_pubsub_refresh_is_throttled_during_heavy_jobs() -> None
     assert "self._pending_monitor_refresh = True" in text
 
 
-def test_video_parse_results_support_filter_sort_and_lazy_previews() -> None:
+def test_video_parse_results_support_filter_sort_and_text_only_results() -> None:
     text = (ROOT / "app/ui/views/video_parse_view.py").read_text(encoding="utf-8")
 
     assert "self.result_filter = \"all\"" in text
     assert "self.result_sort = \"input\"" in text
     assert "_filtered_parse_items" in text
     assert "输入顺序" in text
-    assert "缩略图延迟加载" in text
-    assert "self.preview_image_limit = 36" in text
+    assert "结果列表：纯文本模式" in text
+    assert "create_media_preview" not in text
+    assert "显示缩略图" not in text
+    assert "ft.Image" not in text
+    assert "ft.ProgressBar(" not in text
 
 
 def test_video_parse_batch_download_can_be_cancelled_with_progress_panel() -> None:

@@ -36,7 +36,9 @@ class VideoParsePage(PageBase):
         self.last_result: VideoParseBatchResult | None = None
         self.result_controls: list[ft.Control] = []
         self.result_render_limit = 80
-        self.preview_image_limit = 36
+        # 结果列表固定为纯文本模式：不在列表内渲染远程图片、视频或占位预览。
+        # 这样可以彻底避开部分 Flet/WebView2 环境中媒体控件渲染成大块灰色的问题。
+        self.result_list_text_only = True
         self.show_all_results = False
         self.result_filter = "all"
         self.result_sort = "input"
@@ -79,7 +81,7 @@ class VideoParsePage(PageBase):
         self.input_preview_text = ft.Text(
             "",
             size=12,
-            selectable=True,
+            selectable=False,
             color=ft.Colors.ON_SURFACE_VARIANT,
             visible=False,
         )
@@ -492,31 +494,66 @@ class VideoParsePage(PageBase):
         if self._batch_download_running:
             header_controls.append(ft.OutlinedButton("停止下载", icon=ft.Icons.STOP_CIRCLE, on_click=lambda e: self.run_async(self.cancel_batch_download())))
         self.result_controls.append(ft.Row(controls=header_controls, wrap=True, spacing=8))
+        stat_controls: list[ft.Control] = [
+            self._stat_chip("总数", result.total_count, ft.Colors.PRIMARY),
+            self._stat_chip("成功", result.success_count, ft.Colors.GREEN),
+            self._stat_chip("失败", result.failed_count, ft.Colors.ERROR),
+            self._stat_chip("待解析", max(result.total_count - result.success_count - result.failed_count, 0), ft.Colors.ON_SURFACE_VARIANT),
+        ]
+        # 不能在结果区的 Row 中放 expand=True 的空 Container。
+        # 在部分 Flet/Windows 组合下，它会把剩余区域撑成一整块灰色占位，
+        # 导致解析卡片看起来“消失”。筛选和排序只在已有结果时显示。
+        if result.successes or result.failures:
+            stat_controls.extend([
+                ft.Text("显示：", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                *self._result_filter_buttons(),
+                ft.Text("排序：", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                *self._result_sort_buttons(),
+            ])
         self.result_controls.append(
             ft.Row(
-                controls=[
-                    self._stat_chip("总数", result.total_count, ft.Colors.PRIMARY),
-                    self._stat_chip("成功", result.success_count, ft.Colors.GREEN),
-                    self._stat_chip("失败", result.failed_count, ft.Colors.ERROR),
-                    self._stat_chip("待解析", max(result.total_count - result.success_count - result.failed_count, 0), ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Container(expand=True),
-                    ft.Text("显示：", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    *self._result_filter_buttons(),
-                    ft.Text("排序：", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    *self._result_sort_buttons(),
-                ],
+                controls=stat_controls,
                 wrap=True,
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
         if result.successes:
-            self.result_controls.append(self._download_rules_panel())
+            self.result_controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(left=10, top=6, right=10, bottom=6),
+                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                    border_radius=8,
+                    bgcolor=ft.Colors.SURFACE,
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.VIEW_LIST, size=16, color=ft.Colors.PRIMARY),
+                            ft.Text("结果列表：纯文本模式，不在列表内加载缩略图；点击预览按钮再打开视频/图集。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                )
+            )
+        if self.parse_in_progress and not result.successes and not result.failures:
+            self.result_controls.append(
+                ft.Container(
+                    padding=12,
+                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+                    border_radius=8,
+                    content=ft.Text("正在解析，请稍候。结果会在解析成功后显示在这里。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                )
+            )
+        # 不在结果区渲染“保存规则”面板。
+        # 该面板中的图标 + 可选择长文本在部分 Flet/Windows WebView2 环境会被渲染成大块灰色区域，
+        # 盖住后面的解析结果。保存目录仍可通过“打开导出目录/下载完成弹窗”查看。
         if result.failures:
             self.result_controls.append(self._failure_summary_panel(result.failures))
         if self.result_select_mode:
             self.result_controls.append(self._selection_summary_panel())
-        if self._batch_download_running or self.batch_download_total:
+        # 下载完成后的摘要已经显示在顶部 parse_progress_text 中。
+        # 不在完成状态保留进度面板，避免部分 Flet/WebView2 将进度控件渲染成大灰块。
+        if self._batch_download_running:
             self.result_controls.append(self._batch_download_progress_panel())
         display_successes = filtered_successes if self.show_all_results else filtered_successes[: self.result_render_limit]
         remaining_limit = max(0, self.result_render_limit - len(display_successes))
@@ -530,7 +567,7 @@ class VideoParsePage(PageBase):
                     padding=10,
                     content=ft.Row(
                         controls=[
-                            ft.Text(f"当前为避免卡顿，仅渲染前 {len(display_successes) + len(display_failures)} 条；还有 {hidden_count} 条未显示。", size=12, expand=True),
+                            ft.Text(f"当前为避免卡顿，仅渲染前 {len(display_successes) + len(display_failures)} 条；还有 {hidden_count} 条未显示。", size=12),
                             ft.OutlinedButton("显示全部", icon=ft.Icons.UNFOLD_MORE, on_click=lambda e: self.show_all_parse_results()),
                         ],
                         wrap=True,
@@ -546,10 +583,33 @@ class VideoParsePage(PageBase):
                     content=ft.Text("当前筛选条件下没有结果。", color=ft.Colors.ON_SURFACE_VARIANT),
                 )
             )
+        rendered_cards = 0
         for display_index, item in enumerate(display_successes, start=1):
-            self.result_controls.append(self.create_result_card(item, self._source_order_label(result, item.source_url), display_index=display_index))
+            try:
+                self.result_controls.append(self.create_result_card(item, self._source_order_label(result, item.source_url), display_index=display_index))
+                rendered_cards += 1
+            except Exception as exc:
+                logger.exception(f"render parsed result card failed: {exc}")
+                self.result_controls.append(self.create_result_fallback_card(item, exc))
+                rendered_cards += 1
         for failure in display_failures:
-            self.result_controls.append(self.create_failure_card(result, failure))
+            try:
+                self.result_controls.append(self.create_failure_card(result, failure))
+                rendered_cards += 1
+            except Exception as exc:
+                logger.exception(f"render parsed failure card failed: {exc}")
+                self.result_controls.append(self.create_failure_fallback_card(failure, exc))
+                rendered_cards += 1
+        if total_visible_items > 0 and rendered_cards == 0:
+            self.result_controls.append(
+                ft.Container(
+                    padding=16,
+                    border=ft.Border.all(1, ft.Colors.ERROR_CONTAINER),
+                    border_radius=8,
+                    bgcolor=ft.Colors.ERROR_CONTAINER,
+                    content=ft.Text("解析已有结果，但结果卡片渲染失败。请复制链接重试或查看日志。", color=ft.Colors.ERROR),
+                )
+            )
         self.result_area.controls = list(self.result_controls)
         if not self._is_active_page():
             return
@@ -630,19 +690,25 @@ class VideoParsePage(PageBase):
         base = str(config.get("douyin_content_download_path") or "").strip() or os.path.join(self.app.run_path, "downloads")
         image_format = str(config.get("gallery_image_save_format") or "original")
         image_label = "保留原格式" if image_format == "original" else "统一转 PNG"
+        # 只使用普通短文本，禁止 selectable + expand 的长文本组合，避免 Flet/WebView2 灰色大块。
         return ft.Container(
-            padding=10,
+            padding=8,
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=8,
-            content=ft.Row(
+            content=ft.Column(
                 controls=[
-                    ft.Icon(ft.Icons.SAVE_ALT, size=18, color=ft.Colors.PRIMARY),
-                    ft.Text(f"保存规则：保存到 {base}；图集格式：{image_label}；下载时自动跳过已存在文件。", size=12, color=ft.Colors.ON_SURFACE_VARIANT, expand=True, selectable=True),
-                    ft.TextButton("打开保存目录", icon=ft.Icons.FOLDER_OPEN, on_click=lambda e: self.run_async(self.open_download_location(base))),
+                    ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.SAVE_ALT, size=16, color=ft.Colors.PRIMARY),
+                            ft.Text("保存规则", size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                            ft.TextButton("打开保存目录", icon=ft.Icons.FOLDER_OPEN, on_click=lambda e: self.run_async(self.open_download_location(base))),
+                        ],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Text(f"目录：{self._short_url(base, 90)}；图集格式：{image_label}；已存在文件：跳过。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ],
-                spacing=8,
-                wrap=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=4,
             ),
         )
 
@@ -663,7 +729,7 @@ class VideoParsePage(PageBase):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.ERROR_OUTLINE, size=18, color=ft.Colors.ERROR),
-                    ft.Text(f"失败集中处理：失败 {len(failures)} 条，可重试 {retryable} 条；" + "，".join(parts), size=12, color=ft.Colors.ERROR, expand=True),
+                    ft.Text(f"失败集中处理：失败 {len(failures)} 条，可重试 {retryable} 条；" + "，".join(parts), size=12, color=ft.Colors.ERROR),
                     ft.TextButton("只看失败", icon=ft.Icons.FILTER_ALT, on_click=lambda e: self.set_result_filter("failed")),
                     ft.TextButton("重试失败", icon=ft.Icons.REPLAY, disabled=self.parse_in_progress or self._batch_download_running, on_click=lambda e: self.run_async(self.retry_failures())),
                     ft.TextButton("复制失败链接", icon=ft.Icons.CONTENT_COPY, on_click=lambda e: self.run_async(self.copy_failed_links())),
@@ -684,7 +750,7 @@ class VideoParsePage(PageBase):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.CHECK_BOX, size=18, color=ft.Colors.PRIMARY),
-                    ft.Text(f"选择模式：已选 {selected}/{total} 个结果。可先筛选视频/图集，再下载选中。", size=12, color=ft.Colors.PRIMARY, expand=True),
+                    ft.Text(f"选择模式：已选 {selected}/{total} 个结果。可先筛选视频/图集，再下载选中。", size=12, color=ft.Colors.PRIMARY),
                     ft.TextButton("下载选中", icon=ft.Icons.DOWNLOAD_DONE, disabled=selected <= 0, on_click=lambda e: self.run_async(self.batch_download_selected_results())),
                     ft.TextButton("清空", icon=ft.Icons.CLEAR, disabled=selected <= 0, on_click=lambda e: self.clear_selected_results()),
                 ],
@@ -732,26 +798,34 @@ class VideoParsePage(PageBase):
         return normalize_work_url(item.source_url or "") or item.item_id or item.primary_media_url or str(id(item))
 
     def _batch_download_progress_panel(self) -> ft.Container:
+        """Return a compact text-only batch download panel.
+
+        Do not use ft.ProgressBar here. In the Windows Flet/WebView2 desktop
+        runtime used by this project, ProgressBar can render as a full-width
+        grey rectangle after batch download status changes, which hides parsed
+        result cards. A text-only progress row is stable and still gives clear
+        feedback.
+        """
         total = max(0, int(self.batch_download_total or 0))
         completed = max(0, int(self.batch_download_completed or 0))
-        value = (completed / total) if total else 0
-        status = "正在下载" if self._batch_download_running else "最近下载结果"
+        percent = int((completed / total) * 100) if total else 0
         return ft.Container(
-            padding=10,
+            padding=8,
             border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
             border_radius=8,
-            content=ft.Column(
+            content=ft.Row(
                 controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Text(f"{status}：{completed}/{total}，成功 {self.batch_download_success}，已存在 {self.batch_download_skipped}，失败 {self.batch_download_failed}", size=12, color=ft.Colors.PRIMARY, expand=True),
-                            ft.OutlinedButton("停止下载", icon=ft.Icons.STOP_CIRCLE, visible=self._batch_download_running, on_click=lambda e: self.run_async(self.cancel_batch_download())),
-                        ],
-                        wrap=True,
+                    ft.Icon(ft.Icons.DOWNLOADING, size=16, color=ft.Colors.PRIMARY),
+                    ft.Text(
+                        f"正在下载：{completed}/{total}（{percent}%），成功 {self.batch_download_success}，已存在 {self.batch_download_skipped}，失败 {self.batch_download_failed}",
+                        size=12,
+                        color=ft.Colors.PRIMARY,
                     ),
-                    ft.ProgressBar(value=value),
+                    ft.TextButton("停止下载", icon=ft.Icons.STOP_CIRCLE, on_click=lambda e: self.run_async(self.cancel_batch_download())),
                 ],
-                spacing=6,
+                spacing=8,
+                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
@@ -795,7 +869,7 @@ class VideoParsePage(PageBase):
                 controls=[
                     ft.Row(
                         controls=[
-                            ft.Text(f"{order_label + ' · ' if order_label else ''}解析失败", weight=ft.FontWeight.BOLD, color=ft.Colors.ERROR, expand=True),
+                            ft.Text(f"{order_label + ' · ' if order_label else ''}解析失败", weight=ft.FontWeight.BOLD, color=ft.Colors.ERROR),
                             ft.Container(
                                 bgcolor=ft.Colors.ERROR_CONTAINER,
                                 border_radius=10,
@@ -805,10 +879,10 @@ class VideoParsePage(PageBase):
                         ],
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
-                    ft.Text(failure.source_url, selectable=True, size=12),
-                    ft.Text(f"原因：{failure.reason}", selectable=True, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text(f"建议：{next_step}", selectable=True, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text(f"重试判断：{retry_text} / {action_text}", selectable=True, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(self._short_url(failure.source_url, 120), size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"原因：{failure.reason}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"建议：{next_step}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"重试判断：{retry_text} / {action_text}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                     ft.Row(
                         controls=[
                             ft.OutlinedButton("重试此条", icon=ft.Icons.REPLAY, on_click=lambda e, failed=failure: self.run_async(self.retry_failure(failed))),
@@ -848,20 +922,58 @@ class VideoParsePage(PageBase):
             self.render_result(self.last_result)
 
     def create_result_card(self, item: ParsedVideoResult, order_label: str = "", display_index: int = 0) -> ft.Container:
+        """Create a lightweight text-first result card.
+
+        Do not render inline remote images or placeholder preview panes here. In the
+        Windows/Flet desktop runtime, failed image/video placeholders can expand into
+        a large grey block and hide the parsed content. Preview remains available via
+        explicit buttons so the result list stays stable.
+        """
         item_key = self._result_key(item)
-        media_preview = self.create_media_preview(item, load_remote=display_index <= self.preview_image_limit)
-        direct_url = item.primary_media_url
+        image_urls = item.image_urls or item.watermark_image_urls or []
+        direct_url = item.primary_media_url or (image_urls[0] if image_urls else "")
         work_url = item.source_url
-        actions = [
+        can_download = bool(item.primary_media_url or image_urls)
+        title = item.description or item.item_id or "未命名作品"
+        title_prefix = f"{order_label} · " if order_label else ""
+
+        details: list[ft.Control] = [
+            ft.Text(f"作品 ID：{item.item_id or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"作者：{item.author_nickname or '-'}  {item.author_id or ''}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+        ]
+        if item.media_type == "image" or image_urls:
+            details.append(ft.Text(f"图集图片：{len(image_urls)} 张", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
+        elif item.media_type == "video":
+            quality_hint = "无水印" if item.no_watermark_url else ("有水印" if item.watermark_url else "未获取到直链")
+            details.append(ft.Text(f"视频状态：{quality_hint}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
+
+        link_lines: list[ft.Control] = [
+            ft.Text(
+                f"作品链接：{self._short_url(work_url, 120) if work_url else '未获取到作品链接'}",
+                size=12,
+                color=ft.Colors.ON_SURFACE_VARIANT,
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            )
+        ]
+        if direct_url:
+            link_lines.append(
+                ft.Text(
+                    f"媒体直链：{self._short_url(direct_url, 120)}",
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                    max_lines=1,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                )
+            )
+
+        actions: list[ft.Control] = [
             ft.OutlinedButton("打开原作品", icon=ft.Icons.OPEN_IN_NEW, on_click=lambda e, url=work_url: self.run_async(self.open_url(url))),
         ]
         if direct_url:
-            actions.extend(
-                [
-                    ft.OutlinedButton("复制直链", icon=ft.Icons.CONTENT_COPY, on_click=lambda e, url=direct_url: self.run_async(self.copy_text(url))),
-                    ft.FilledButton("下载", icon=ft.Icons.DOWNLOAD, on_click=lambda e, parsed_item=item: self.run_async(self.download_result(parsed_item))),
-                ]
-            )
+            actions.append(ft.OutlinedButton("复制直链", icon=ft.Icons.CONTENT_COPY, on_click=lambda e, url=direct_url: self.run_async(self.copy_text(url))))
+        if can_download:
+            actions.append(ft.FilledButton("下载", icon=ft.Icons.DOWNLOAD, on_click=lambda e, parsed_item=item: self.run_async(self.download_result(parsed_item))))
         if item.media_type == "video" and direct_url:
             actions.append(
                 ft.OutlinedButton(
@@ -870,7 +982,7 @@ class VideoParsePage(PageBase):
                     on_click=lambda e, url=direct_url, source=item.source_url: self.run_async(self.preview_video(url, source)),
                 )
             )
-        if item.media_type == "image" and item.image_urls:
+        if (item.media_type == "image" or image_urls) and image_urls:
             actions.append(
                 ft.OutlinedButton(
                     "预览图集",
@@ -878,82 +990,92 @@ class VideoParsePage(PageBase):
                     on_click=lambda e, parsed_item=item: self.run_async(self.preview_images(parsed_item)),
                 )
             )
-        details = [
-            ft.Text(f"作品 ID：{item.item_id or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-            ft.Text(f"作者：{item.author_nickname or '-'}  {item.author_id or ''}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-        ]
-        if item.media_type == "image" or item.image_urls:
-            image_count = len(item.image_urls or item.watermark_image_urls or [])
-            details.append(ft.Text(f"图集图片：{image_count} 张", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
-        elif item.media_type == "video":
-            quality_hint = "无水印" if item.no_watermark_url else ("有水印" if item.watermark_url else "未获取到直链")
-            details.append(ft.Text(f"视频状态：{quality_hint}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
+
+        header_controls: list[ft.Control] = []
+        if self.result_select_mode:
+            header_controls.append(
+                ft.Checkbox(
+                    value=item_key in self.selected_result_keys,
+                    tooltip="选择此结果",
+                    on_change=lambda e, key=item_key: self.toggle_result_selection(key, bool(e.control.value)),
+                )
+            )
+        header_controls.extend(
+            [
+                ft.Text(f"{title_prefix}{title}", weight=ft.FontWeight.BOLD, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                ft.Container(
+                    bgcolor=ft.Colors.TEAL_50,
+                    border_radius=6,
+                    padding=ft.Padding.only(left=8, top=3, right=8, bottom=3),
+                    content=ft.Text(self._media_type_label(item), size=11, color=ft.Colors.TEAL_700),
+                ),
+            ]
+        )
+
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=8,
             padding=12,
-            content=ft.Container(
-                content=ft.Row(
-                    controls=[
-                        *([ft.Checkbox(value=item_key in self.selected_result_keys, tooltip="选择此结果", on_change=lambda e, key=item_key: self.toggle_result_selection(key, bool(e.control.value)))] if self.result_select_mode else []),
-                        media_preview,
-                        ft.Column(
-                            controls=[
-                                ft.Row(
-                                    controls=[
-                                        ft.Text(f"{order_label + ' · ' if order_label else ''}{item.description or item.item_id or '未命名作品'}", weight=ft.FontWeight.BOLD, expand=True),
-                                        ft.Container(
-                                            bgcolor=ft.Colors.TEAL_50,
-                                            border_radius=6,
-                                            padding=ft.Padding.only(left=8, top=3, right=8, bottom=3),
-                                            content=ft.Text(self._media_type_label(item), size=11, color=ft.Colors.TEAL_700),
-                                        ),
-                                    ],
-                                ),
-                                *details,
-                                ft.Text(
-                                    work_url or "未获取到作品链接",
-                                    size=12,
-                                    selectable=True,
-                                    color=ft.Colors.ON_SURFACE_VARIANT,
-                                    max_lines=3,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                                ft.Row(controls=actions, wrap=True, spacing=8),
-                            ],
-                            spacing=6,
-                        ),
-                    ],
-                    spacing=12,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
+            bgcolor=ft.Colors.SURFACE,
+            # 严禁在结果卡片里加入 图片控件、视频控件或媒体占位容器。
+            # 媒体控件只能在 preview_video/preview_images 的弹窗中按需加载。
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=header_controls,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    *details,
+                    *link_lines,
+                    ft.Row(controls=actions, wrap=True, spacing=8),
+                ],
+                spacing=6,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
 
-    def create_media_preview(self, item: ParsedVideoResult, *, load_remote: bool = True) -> ft.Container:
-        image_url = item.image_urls[0] if item.image_urls else ""
-        if image_url and load_remote:
-            content: ft.Control = ft.Image(src=image_url, width=120, height=150, fit=ft.BoxFit.COVER)
-        elif image_url:
-            content = ft.Column(
-                controls=[
-                    ft.Icon(ft.Icons.IMAGE_OUTLINED, size=36, color=ft.Colors.TEAL_400),
-                    ft.Text("缩略图延迟加载", size=11, color=ft.Colors.ON_SURFACE_VARIANT),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                tight=True,
-            )
-        else:
-            content = ft.Icon(ft.Icons.SMART_DISPLAY, size=42, color=ft.Colors.TEAL_400)
+
+    def create_result_fallback_card(self, item: ParsedVideoResult, exc: Exception) -> ft.Container:
         return ft.Container(
-            width=120,
-            height=150,
+            border=ft.Border.all(1, ft.Colors.ERROR_CONTAINER),
             border_radius=8,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-            alignment=ft.Alignment.CENTER,
-            content=content,
+            padding=12,
+            bgcolor=ft.Colors.SURFACE,
+            content=ft.Column(
+                controls=[
+                    ft.Text(item.description or item.item_id or "解析结果", weight=ft.FontWeight.BOLD),
+                    ft.Text(f"作品链接：{self._short_url(item.source_url or '-', 120)}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"直链：{self._short_url(item.primary_media_url or '-', 120)}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"结果卡片渲染异常：{exc}", size=12, color=ft.Colors.ERROR),
+                    ft.Row(
+                        controls=[
+                            ft.OutlinedButton("打开原作品", icon=ft.Icons.OPEN_IN_NEW, on_click=lambda e, url=item.source_url: self.run_async(self.open_url(url))),
+                            ft.OutlinedButton("复制直链", icon=ft.Icons.CONTENT_COPY, disabled=not bool(item.primary_media_url), on_click=lambda e, url=item.primary_media_url: self.run_async(self.copy_text(url))),
+                            ft.FilledButton("下载", icon=ft.Icons.DOWNLOAD, disabled=not bool(item.primary_media_url or item.image_urls or item.watermark_image_urls), on_click=lambda e, parsed_item=item: self.run_async(self.download_result(parsed_item))),
+                        ],
+                        wrap=True,
+                        spacing=8,
+                    ),
+                ],
+                spacing=6,
+            ),
+        )
+
+    def create_failure_fallback_card(self, failure: ParseFailure, exc: Exception) -> ft.Container:
+        return ft.Container(
+            border=ft.Border.all(1, ft.Colors.ERROR_CONTAINER),
+            border_radius=8,
+            padding=12,
+            bgcolor=ft.Colors.SURFACE,
+            content=ft.Column(
+                controls=[
+                    ft.Text("解析失败", weight=ft.FontWeight.BOLD, color=ft.Colors.ERROR),
+                    ft.Text(self._short_url(failure.source_url or "-", 120), size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"原因：{failure.reason or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"失败卡片渲染异常：{exc}", size=12, color=ft.Colors.ERROR),
+                ],
+                spacing=6,
+            ),
         )
 
     async def set_loading(self, value: bool, can_cancel: bool = False) -> None:
@@ -1221,6 +1343,8 @@ class VideoParsePage(PageBase):
             self._batch_download_running = False
             self._batch_download_cancel_requested = False
             await self.set_loading(False)
+            if self.last_result:
+                self.render_result(self.last_result)
 
     async def _batch_download_items(self, items: list[ParsedVideoResult], *, title_prefix: str = "批量下载") -> None:
         self._batch_download_running = True
@@ -1296,6 +1420,8 @@ class VideoParsePage(PageBase):
             self._batch_download_running = False
             self._batch_download_cancel_requested = False
             await self.set_loading(False)
+            if self.last_result:
+                self.render_result(self.last_result)
 
     async def cancel_batch_download(self) -> None:
         if not self._batch_download_running:
