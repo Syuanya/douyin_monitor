@@ -1,0 +1,9 @@
+TokenManager:
+  tiktok:
+    headers:
+      User-Agent: 'com.zhiliaoapp.musically/202400 (Linux; U; Android 10; en_US)'
+      Referer: 'https://www.tiktok.com/'
+      Cookie: ''
+    proxies:
+      http: null
+      https: null

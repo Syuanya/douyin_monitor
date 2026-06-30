@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from ..runtime.media_task_queue import report_media_task_progress
+from ..runtime.media_task_queue import current_media_task_id, report_media_task_progress
 from .file_naming import DEFAULT_FILENAME_TEMPLATE, format_media_filename, safe_filename
 from .image_conversion import save_image_as_png
 from .image_urls import IMAGE_SUFFIXES, deduplicate_image_urls, infer_image_suffix
@@ -244,7 +244,7 @@ class ParsedMediaDownloader:
             "Referer": "https://www.douyin.com/",
         }
         recovery = getattr(self.services, "download_recovery_service", None)
-        download_id = recovery.start(url=url, save_path=save_path, kind="parsed_media", label=os.path.basename(save_path)) if recovery else ""
+        download_id = recovery.start(url=url, save_path=save_path, kind="parsed_media", label=os.path.basename(save_path), task_id=current_media_task_id()) if recovery else ""
         try:
             await download_http_file(
                 url,

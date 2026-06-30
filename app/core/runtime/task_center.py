@@ -9,12 +9,20 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .operation_models import (
+    is_active_task_status,
+    normalize_task_status,
+    task_status_key,
+)
+
 
 TASK_STATUS_WAITING = "等待中"
 TASK_STATUS_RUNNING = "运行中"
 TASK_STATUS_COMPLETED = "完成"
 TASK_STATUS_FAILED = "失败"
 TASK_STATUS_CANCELLED = "已取消"
+ACTIVE_TASK_STATUSES = {TASK_STATUS_WAITING, TASK_STATUS_RUNNING}
+TERMINAL_TASK_STATUSES = {TASK_STATUS_COMPLETED, TASK_STATUS_FAILED, TASK_STATUS_CANCELLED}
 
 
 @dataclass(slots=True)
@@ -92,7 +100,7 @@ class TaskCenter:
                 return
             for key in ("status", "detail"):
                 if key in updates and updates[key] is not None:
-                    setattr(record, key, str(updates[key]))
+                    setattr(record, key, normalize_task_status(updates[key]) if key == "status" else str(updates[key]))
             for key in ("total", "completed", "success_count", "failed_count"):
                 if key in updates and updates[key] is not None:
                     try:
@@ -145,7 +153,7 @@ class TaskCenter:
             records = list(self._records[: max(1, int(limit or 80))])
             if self._dirty and time.monotonic() - self._last_save_at >= self._save_interval_seconds:
                 self._save_locked(force=True)
-        return [asdict(record) for record in records]
+        return [self._record_payload(record) for record in records]
 
     def clear_completed(self) -> None:
         with self._lock:
@@ -162,10 +170,39 @@ class TaskCenter:
             self._records = [record for record in self._records if record.status != TASK_STATUS_CANCELLED]
             self._save_locked(force=True)
 
-    def clear_all(self) -> None:
+    def active_count(self) -> int:
         with self._lock:
-            self._records = []
+            return len([record for record in self._records if is_active_task_status(record.status)])
+
+    def clear_all(self, *, include_active: bool = False) -> dict[str, int]:
+        """Clear records safely.
+
+        By default, running and waiting records are kept so the UI cannot hide
+        tasks that are still executing in the queue. Pass include_active=True
+        only for explicit maintenance/recovery tooling.
+        """
+        with self._lock:
+            before = len(self._records)
+            if include_active:
+                self._records = []
+                blocked = 0
+            else:
+                active = [record for record in self._records if is_active_task_status(record.status)]
+                self._records = active
+                blocked = len(active)
+            deleted = before - len(self._records)
             self._save_locked(force=True)
+            return {"deleted": deleted, "blocked": blocked, "remaining": len(self._records)}
+
+
+    @staticmethod
+    def _record_payload(record: TaskRecord) -> dict[str, Any]:
+        payload = asdict(record)
+        payload["status"] = normalize_task_status(payload.get("status"))
+        payload["status_key"] = task_status_key(payload.get("status"))
+        payload["status_label"] = payload["status"]
+        payload["is_active"] = is_active_task_status(payload.get("status"))
+        return payload
 
     def _find_locked(self, task_id: str) -> TaskRecord | None:
         for record in self._records:
@@ -190,6 +227,7 @@ class TaskCenter:
                 values["task_id"] = str(values.get("task_id") or uuid.uuid4().hex)
                 values["title"] = str(values.get("title") or "未命名任务")
                 values["retry_payload"] = values.get("retry_payload") if isinstance(values.get("retry_payload"), dict) else {}
+                values["status"] = normalize_task_status(values.get("status"))
                 for key in ("total", "completed", "success_count", "failed_count"):
                     try:
                         values[key] = max(0, int(values.get(key) or 0))
@@ -217,6 +255,7 @@ class TaskCenter:
                 values["task_id"] = str(values.get("task_id") or uuid.uuid4().hex)
                 values["title"] = str(values.get("title") or "未命名任务")
                 values["retry_payload"] = values.get("retry_payload") if isinstance(values.get("retry_payload"), dict) else {}
+                values["status"] = normalize_task_status(values.get("status"))
                 for key in ("total", "completed", "success_count", "failed_count"):
                     try:
                         values[key] = max(0, int(values.get(key) or 0))

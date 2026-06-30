@@ -410,7 +410,7 @@ async function loadTasks() {
     const data = await api('/api/tasks'); const records = data.records || []; const jobs = data.web_jobs || [];
     $('taskList').innerHTML = [
       ...jobs.map(j => `<div class="card"><div class="card-title"><strong>${escapeHtml(j.title)}</strong>${badge(j.status, j.status==='failed'?'danger':j.status==='completed'?'ok':'')}</div><p>创建：${fmtTime(j.created_at)} ｜ 更新：${fmtTime(j.updated_at)}</p><div class="card-actions">${j.status==='running'?`<button onclick="cancelJob('${j.job_id}')" class="danger">取消</button>`:''}</div><pre>${escapeHtml(JSON.stringify(j.result || j.error || {}, null, 2))}</pre></div>`),
-      ...records.map(t => `<div class="card"><div class="card-title"><strong>${escapeHtml(t.title)}</strong>${badge(t.status, t.status==='failed'?'danger':t.status==='completed'?'ok':'')}</div><p>${escapeHtml(t.detail || '')}</p><p>进度：${t.completed || 0}/${t.total || 0} 成功 ${t.success_count || 0} 失败 ${t.failed_count || 0}</p><div class="card-actions"><button onclick="cancelTaskRecord('${t.task_id}')">取消记录</button>${t.retry_action?`<button onclick="retryTaskRecord('${t.task_id}')">重试</button>`:''}</div></div>`)
+      ...records.map(t => { const active=['运行中','等待中','running','pending'].includes(t.status); return `<div class="card"><div class="card-title"><strong>${escapeHtml(t.title)}</strong>${badge(t.status, t.status==='failed'?'danger':t.status==='completed'?'ok':'')}</div><p>${escapeHtml(t.detail || '')}</p><p>进度：${t.completed || 0}/${t.total || 0} 成功 ${t.success_count || 0} 失败 ${t.failed_count || 0}</p><div class="card-actions"><button onclick="cancelTaskRecord('${t.task_id}')" ${active?'disabled title="运行中任务请使用下载队列取消"':''}>${active?'运行中不可只取消记录':'标记取消记录'}</button>${t.retry_action?`<button onclick="retryTaskRecord('${t.task_id}')">重试</button>`:''}</div></div>`; })
     ].join('') || '<div class="panel">暂无任务。</div>';
   } catch (e) { toast(`加载任务失败：${e.message}`); }
 }
@@ -420,11 +420,24 @@ async function retryTaskRecord(id){ const r=await api(`/api/tasks/${id}/retry`,{
 
 async function loadHistory() {
   try {
-    const data = await api(`/api/download-history?status=${encodeURIComponent($('historyStatus').value)}&limit=120`);
-    const c = data.counts || {}; $('historyStats').innerHTML = [stat('总数', c.total), stat('完成', c.completed), stat('失败', c.failed), stat('可恢复', c.recoverable)].join('');
-    $('historyList').innerHTML = (data.records || []).map(r => `<div class="card"><div class="card-title"><strong>${escapeHtml(truncate(r.label || r.title || r.download_id, 90))}</strong>${badge(r.status, r.status==='failed'?'danger':r.status==='completed'?'ok':'')}</div><p>进度：${r.bytes_downloaded || 0}/${r.total_bytes || 0}</p><p class="hint">${escapeHtml(r.save_path || r.url || '')}</p>${r.error?`<p class="hint danger">${escapeHtml(r.error)}</p>`:''}</div>`).join('') || '<div class="panel">暂无下载历史。</div>';
+    const params = new URLSearchParams({
+      status: $('historyStatus').value,
+      query: $('historyQuery') ? $('historyQuery').value : '',
+      limit: 120,
+      offset: 0,
+    });
+    const data = await api(`/api/download-history?${params}`);
+    const c = data.counts || {};
+    $('historyStats').innerHTML = [stat('总数', c.total), stat('完成', c.completed), stat('失败', c.failed), stat('可恢复', c.recoverable), stat('文件缺失', c.missing_file || 0)].join('');
+    $('historyList').innerHTML = (data.records || []).map(r => {
+      const fileState = r.file_state || '';
+      const task = r.task_id ? `<p class="hint">关联任务：${escapeHtml(r.task_id)}</p>` : '';
+      return `<div class="card"><div class="card-title"><strong>${escapeHtml(truncate(r.label || r.title || r.download_id, 90))}</strong>${badge(r.status, r.status==='failed'?'danger':r.status==='completed'?'ok':'')}</div><p>进度：${r.bytes_downloaded || 0}/${r.total_bytes || 0}</p>${fileState?`<p class="hint">文件状态：${escapeHtml(fileState)}</p>`:''}${task}<p class="hint">${escapeHtml(r.save_path || r.url || '')}</p>${r.error?`<p class="hint danger">${escapeHtml(r.error)}</p>`:''}</div>`;
+    }).join('') || '<div class="panel">暂无下载历史。</div>';
   } catch(e) { toast(`加载下载历史失败：${e.message}`); }
 }
+async function recoverHistoryAll(){ const concurrency = Number(prompt('恢复并发数：1=最稳，2=推荐，3=较快', '2') || 2); const r = await api('/api/download-history/recover-all', {method:'POST', body: JSON.stringify({concurrency})}); toast(`恢复完成：成功 ${r.success_count || 0}，失败 ${r.failed_count || 0}`); await loadHistory(); await loadTasks(); }
+async function exportHistoryCurrent(){ const r = await api('/api/download-history/export', {method:'POST', body: JSON.stringify({status: $('historyStatus').value, query: $('historyQuery') ? $('historyQuery').value : ''})}); toast(r.success ? `已导出 ${r.total} 条：${r.path}` : (r.reason || '导出失败')); }
 
 
 async function exportDiagnostics(){ const res=await fetch('/api/diagnostics/export',{method:'POST', headers:headers()}); if(!res.ok) return toast('导出失败'); const blob=await res.blob(); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='douyin_monitor_diagnostics.zip'; a.click(); URL.revokeObjectURL(url); }
@@ -803,7 +816,7 @@ function bindEvents() {
   $('markSeenSelectedBtn').onclick = () => { const items=[...state.selectedItems].map(parseKey); if(!items.length) return toast('请先选择作品'); markSeen(items); };
   $('previewImportBtn').onclick = previewImport; $('commitImportBtn').onclick = commitImport;
   $('parseBtn').onclick = parseText; $('clearParseBtn').onclick = () => { $('parseResult').innerHTML=''; $('parseProgress').textContent='等待解析...'; };
-  $('refreshTasksBtn').onclick = loadTasks; $('refreshHistoryBtn').onclick = loadHistory; $('historyStatus').onchange = loadHistory;
+  $('refreshTasksBtn').onclick = loadTasks; $('refreshHistoryBtn').onclick = loadHistory; $('historyStatus').onchange = loadHistory; if($('historyQuery')) $('historyQuery').onkeydown = (e)=>{ if(e.key==='Enter') loadHistory(); }; if($('recoverHistoryBtn')) $('recoverHistoryBtn').onclick = recoverHistoryAll; if($('exportHistoryBtn')) $('exportHistoryBtn').onclick = exportHistoryCurrent;
   $('saveSettingsBtn').onclick = saveSettings; $('reloadSettingsBtn').onclick = loadSettings;
   $('runDiagnosticsBtn') && ($('runDiagnosticsBtn').onclick = loadDiagnostics); $('exportDiagnosticsBtn') && ($('exportDiagnosticsBtn').onclick = exportDiagnostics);
   $('saveCookieBtn') && ($('saveCookieBtn').onclick = saveCookies); $('refreshCookieBtn') && ($('refreshCookieBtn').onclick = loadCookies); $('clearCookieHealthBtn') && ($('clearCookieHealthBtn').onclick = clearCookieHealth);

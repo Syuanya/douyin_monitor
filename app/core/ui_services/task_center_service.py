@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
+from ..runtime.operation_models import OperationStatus, task_status_key
 from ..runtime.task_center import (
     TASK_STATUS_CANCELLED,
     TASK_STATUS_COMPLETED,
@@ -30,14 +32,15 @@ class TaskCenterFacadeService:
 
     @staticmethod
     def counts(records: list[dict[str, Any]]) -> dict[str, int]:
+        status_keys = [task_status_key(record.get("status_key") or record.get("status")) for record in records]
         return {
             "total": len(records),
-            "running": len([record for record in records if record.get("status") == TASK_STATUS_RUNNING]),
-            "waiting": len([record for record in records if record.get("status") == TASK_STATUS_WAITING]),
-            "failed": len([record for record in records if record.get("status") == TASK_STATUS_FAILED]),
-            "cancelled": len([record for record in records if record.get("status") == TASK_STATUS_CANCELLED]),
-            "completed": len([record for record in records if record.get("status") == TASK_STATUS_COMPLETED]),
-            "retryable": len([record for record in records if record.get("status") == TASK_STATUS_FAILED and record.get("retry_action")]),
+            "running": len([status for status in status_keys if status == OperationStatus.RUNNING.value]),
+            "waiting": len([status for status in status_keys if status in {OperationStatus.WAITING.value, OperationStatus.PENDING.value}]),
+            "failed": len([status for status in status_keys if status == OperationStatus.FAILED.value]),
+            "cancelled": len([status for status in status_keys if status == OperationStatus.CANCELLED.value]),
+            "completed": len([status for status in status_keys if status == OperationStatus.COMPLETED.value]),
+            "retryable": len([record for record in records if task_status_key(record.get("status_key") or record.get("status")) == OperationStatus.FAILED.value and record.get("retry_action")]),
         }
 
     @staticmethod
@@ -48,19 +51,38 @@ class TaskCenterFacadeService:
         )
 
     @staticmethod
-    def filter_records(records: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+    def record_search_text(record: dict[str, Any]) -> str:
+        payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
+        parts = [
+            record.get("task_id"),
+            record.get("title"),
+            record.get("category"),
+            record.get("status"),
+            record.get("detail"),
+            record.get("retry_action"),
+            json.dumps(payload, ensure_ascii=False),
+        ]
+        return " ".join(str(part or "") for part in parts).lower()
+
+    @staticmethod
+    def filter_records(records: list[dict[str, Any]], mode: str, query: str = "") -> list[dict[str, Any]]:
         mode = str(mode or "all")
         status_map = {
-            "running": TASK_STATUS_RUNNING,
-            "failed": TASK_STATUS_FAILED,
-            "cancelled": TASK_STATUS_CANCELLED,
-            "completed": TASK_STATUS_COMPLETED,
-            "waiting": TASK_STATUS_WAITING,
+            "running": {OperationStatus.RUNNING.value},
+            "failed": {OperationStatus.FAILED.value},
+            "cancelled": {OperationStatus.CANCELLED.value},
+            "completed": {OperationStatus.COMPLETED.value},
+            "waiting": {OperationStatus.WAITING.value, OperationStatus.PENDING.value},
         }
-        status = status_map.get(mode)
-        if not status:
-            return records
-        return [record for record in records if record.get("status") == status]
+        statuses = status_map.get(mode)
+        result = [record for record in records if not statuses or task_status_key(record.get("status_key") or record.get("status")) in statuses]
+        terms = [term.lower() for term in str(query or "").strip().split() if term.strip()]
+        if not terms:
+            return result
+        return [record for record in result if all(term in TaskCenterFacadeService.record_search_text(record) for term in terms)]
+
+    def filtered_records(self, *, limit: int = 1000, mode: str = "all", query: str = "") -> list[dict[str, Any]]:
+        return self.filter_records(self.records(limit), mode, query)
 
 
     def batch_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -78,7 +100,8 @@ class TaskCenterFacadeService:
         for job in jobs:
             status = str(job.get("status") or "unknown")
             counts[status] = counts.get(status, 0) + 1
-        return {"total": len(jobs), "counts": counts, "jobs": jobs}
+        active_count = len([job for job in jobs if str(job.get("status") or "") in {"running", "paused", "failed"}])
+        return {"total": len(jobs), "active_count": active_count, "counts": counts, "jobs": jobs}
 
     def batch_job_detail(self, job_id: str) -> dict[str, Any]:
         store = getattr(self.app.services, "batch_job_store", None)
@@ -180,11 +203,48 @@ class TaskCenterFacadeService:
             "waiting_labels": waiting_labels,
         }
 
+
+    def related_download_records(self, record: dict[str, Any], limit: int = 50) -> list[dict[str, Any]]:
+        store = getattr(self.app.services, "sqlite_store", None)
+        if store is None or not hasattr(store, "load_download_records"):
+            return []
+        related: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        task_id = str(record.get("task_id") or "")
+        try:
+            if task_id:
+                for item in store.load_download_records(task_id=task_id, limit=limit):
+                    did = str(item.get("download_id") or "")
+                    if did and did in seen:
+                        continue
+                    seen.add(did)
+                    related.append(item)
+        except Exception:
+            pass
+        payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
+        for download_id in [str(item) for item in payload.get("download_ids", []) if item]:
+            if download_id in seen:
+                continue
+            try:
+                rows = store.load_download_records(download_id=download_id, limit=1)
+            except Exception:
+                rows = []
+            if rows:
+                seen.add(download_id)
+                related.append(rows[0])
+            if len(related) >= limit:
+                break
+        return related[: max(1, int(limit or 50))]
+
     async def retry_record(self, record: dict[str, Any]) -> dict[str, Any]:
         action = str(record.get("retry_action") or "")
         payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
         if action == "content_download_items":
             return await self.retry_content_download_items(payload)
+        if action == "download_recover_all":
+            return await self.retry_download_recovery(payload)
+        if action == "download_recover_one":
+            return await self.retry_download_recovery(payload)
         return {"success": False, "reason": "当前任务不支持自动重试"}
 
     async def retry_all_failed(self, delay_seconds: float = 0.1) -> dict[str, int]:
@@ -202,6 +262,62 @@ class TaskCenterFacadeService:
             if delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
         return {"total": len(retryable), "success_tasks": success_tasks, "failed_tasks": failed_tasks}
+
+
+    async def retry_download_recovery(self, payload: dict[str, Any]) -> dict[str, Any]:
+        history = getattr(self.app, "download_history_service", None)
+        recovery = getattr(self.app.services, "download_recovery_service", None)
+        store = getattr(self.app.services, "sqlite_store", None)
+        if recovery is None or store is None:
+            return {"success": False, "reason": "下载恢复服务不可用"}
+        download_ids = [str(item) for item in payload.get("download_ids", []) if item]
+        if not download_ids:
+            return {"success": False, "reason": "缺少可恢复下载记录"}
+        records: list[dict[str, Any]] = []
+        for download_id in download_ids:
+            try:
+                row = store.get_download_record(download_id) if hasattr(store, "get_download_record") else None
+            except Exception:
+                row = None
+            if isinstance(row, dict):
+                records.append(row)
+        if not records:
+            return {"success": False, "reason": "下载记录不存在"}
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyin.com/"}
+        settings = getattr(self.app.services, "settings_config", None)
+        cookies = getattr(settings, "cookies_config", {}) if settings is not None else {}
+        cookie = str((cookies or {}).get("douyin_cookie") or "").strip()
+        if cookie:
+            headers["Cookie"] = cookie
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        proxy = str(config.get("proxy_address") or "").strip() or None if config.get("enable_proxy") else None
+        resume_enabled = bool(config.get("download_resume_enabled", True))
+        concurrency = max(1, min(5, int(payload.get("concurrency") or 2)))
+        success = failed = 0
+        failures: list[dict[str, str]] = []
+        failure_categories: dict[str, int] = {}
+        lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def recover_record(record: dict[str, Any]) -> None:
+            nonlocal success, failed
+            async with semaphore:
+                if hasattr(recovery, "recover_one_result"):
+                    result = await recovery.recover_one_result(record, headers=headers, proxy=proxy, resume_enabled=resume_enabled)
+                else:
+                    ok = await recovery.recover_one(record, headers=headers, proxy=proxy, resume_enabled=resume_enabled)
+                    result = {"success": bool(ok), "reason": "恢复完成" if ok else "恢复失败"}
+            async with lock:
+                if result.get("success"):
+                    success += 1
+                else:
+                    failed += 1
+                    category = str(result.get("category") or classify_failure(str(result.get("reason") or "")).get("category") or "执行失败")
+                    failure_categories[category] = failure_categories.get(category, 0) + 1
+                    failures.append({"download_id": str(record.get("download_id") or ""), "reason": str(result.get("reason") or "恢复失败"), "category": category})
+
+        await asyncio.gather(*(recover_record(record) for record in records))
+        return {"success": failed == 0, "success_count": success, "failed_count": failed, "failures": failures, "failure_categories": failure_categories, "concurrency": concurrency}
 
     async def retry_content_download_items(self, payload: dict[str, Any]) -> dict[str, Any]:
         manager = getattr(self.app.services, "douyin_content_monitor", None)
@@ -274,6 +390,46 @@ class TaskCenterFacadeService:
     def retry_failed_ids(record: dict[str, Any]) -> list[str]:
         payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
         return [str(item_id) for item_id in payload.get("failed_item_ids", []) if item_id]
+
+    @staticmethod
+    def failure_category_summary_from_reasons(reasons: dict[str, Any]) -> dict[str, int]:
+        summary: dict[str, int] = {}
+        for reason in (reasons or {}).values():
+            category = classify_failure(str(reason or "")).get("category") or "执行失败"
+            summary[category] = summary.get(category, 0) + 1
+        return summary
+
+    @staticmethod
+    def failure_category_text(summary: dict[str, int]) -> str:
+        if not summary:
+            return ""
+        return "，".join(f"{name} {count}" for name, count in sorted(summary.items()))
+
+    def related_download_summary(self, record: dict[str, Any]) -> dict[str, Any]:
+        records = self.related_download_records(record, limit=500)
+        status_counts: dict[str, int] = {}
+        missing = recoverable = 0
+        failures: dict[str, int] = {}
+        try:
+            from .download_history_service import DownloadHistoryService
+
+            history = DownloadHistoryService(self.app)
+            for item in records:
+                status = str(item.get("status") or "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                if history.is_missing_completed_file(item):
+                    missing += 1
+                if history.is_recoverable(item):
+                    recoverable += 1
+                meta = history.failure_meta(item)
+                if meta:
+                    category = str(meta.get("category") or "执行失败")
+                    failures[category] = failures.get(category, 0) + 1
+        except Exception:
+            for item in records:
+                status = str(item.get("status") or "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+        return {"total": len(records), "status_counts": status_counts, "missing_file": missing, "recoverable": recoverable, "failure_categories": failures}
 
     @staticmethod
     def task_detail_lines(record: dict[str, Any]) -> list[str]:

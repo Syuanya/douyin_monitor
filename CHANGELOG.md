@@ -1,4 +1,57 @@
+## 任务中心与下载历史 P3 深度架构优化
+
+- 新增 `app/core/runtime/operation_models.py`，统一任务状态、下载状态、文件状态、可恢复判断和中英文显示映射。
+- 任务中心快照新增 `status_key`、`status_label`、`is_active`，UI 与服务层可同时兼容中文旧状态和英文规范状态。
+- 下载历史记录统一通过 `enriched_record()` 输出，补充状态中文名、文件状态 key/label、是否可恢复、是否完成文件缺失、失败归类和处理建议。
+- SQLite 下载记录写入时统一规范化 `status`，并新增 `idx_download_records_task_id` 索引，提升任务详情查询关联下载记录的性能。
+- 旧版 `download_recovery.py` 保留为兼容层，状态常量改为复用统一状态模型，正式恢复执行继续由 `download_recovery_service.py` 承担。
+- 任务中心 UI 的筛选、重试、颜色和清理保护改为基于统一状态 key 判断，避免后续 Web/API 英文状态进入后判断失效。
+- 新增 `tests/test_operation_models_p3.py`，覆盖任务状态兼容、下载状态规范化、文件状态与可恢复判断。
+- 验证：`python -m compileall -q app tests`，`PYTHONPATH=. pytest -q`，138 passed；`ui_static_check`、`ui_layout_regression_check`、`release_gate` 均通过。
+
+## 任务中心与下载历史 P1 专业优化
+
+- 任务中心新增关键词搜索，支持按标题、类型、说明、任务ID、重试参数和作品ID检索任务。
+- 任务中心列表改为渐进加载，默认显示 50 条并支持“加载更多”，避免记录多时整页渲染卡顿。
+- 批量任务面板不再固定只显示 3 个，改为展示活跃任务优先、最多 12 个，并显示活跃任务数量。
+- 下载历史新增关键词搜索，支持按标题、路径、URL、失败原因和关联任务ID检索。
+- 下载历史新增“文件缺失”筛选，能够发现数据库显示完成但本地文件已不存在的记录。
+- 下载历史列表改为渐进加载，默认显示 50 条，支持加载更多，避免历史记录多时卡顿。
+- 下载历史增加复制路径、复制 URL、失败归类和建议处理展示。
+- CSV 导出拆分为“导出当前筛选”和“导出全部”，并补充文件状态、失败分类字段。
+- 清理完成/失败记录增加二次确认，明确只清理历史记录，不删除本地文件。
+- Web API 支持任务中心和下载历史的 query/status/offset/limit 查询参数，便于 Web 端后续分页搜索对齐。
+- 验证：`python -m compileall -q app tests`，`PYTHONPATH=. pytest -q`，136 passed。
+
+## 任务中心与下载历史 P0 专业优化
+
+- 下载记录写入时自动绑定当前任务中心 `task_id`，任务中心详情可回溯关联下载记录。
+- 下载历史详情新增关联任务、文件状态，CSV 导出补充关联任务字段。
+- “恢复全部”和单条恢复均进入任务中心，显示恢复进度、成功/失败数量和失败原因。
+- 修正“可恢复”筛选逻辑：只展示真实可恢复记录，不再混入所有失败/取消/运行中记录。
+- 任务中心清空记录改为安全清理，运行中/等待中任务不会被隐藏或误删。
+- Web 端取消任务语义收敛：运行中/等待中任务不允许只取消记录，避免 UI 状态和真实队列状态冲突。
+- 验证：`PYTHONPATH=. pytest -q`，136 passed。
+
 # Changelog
+
+## 1.0.4
+
+- 设置模块继续做 P3 稳定性优化：完整设置页不再使用原生 `ft.Switch`，统一改为按钮式布尔开关，降低 Windows/Flet WebView2 灰块和卡顿风险。
+- 布尔设置状态统一由 `_toggle_values` 管理，保存、运行模式预设、保存后回填仍按原配置键读写，不改变配置文件结构。
+- 单账号通知列表改为搜索、分页和批量开启/关闭，避免账号多时一次性渲染大量开关控件。
+- 新增 `tests/test_settings_toggle_and_account_list_regression.py`，覆盖设置页无原生 Switch、账号通知分页、状态字典保存等回归点。
+- `scripts/ui_static_check.py` 增加 P3 稳定性规则，阻止设置页重新引入原生 Switch 或缺失分页/按钮式开关标记。
+- 验证：`135 passed`，`release_gate: OK`。
+
+## 1.0.3
+
+- 设置模块继续做 P2 存储维护优化：新增“扫描残留”和“清理临时文件”能力。
+- `settings_storage_service.py` 扩展为存储检查 + 存储维护服务，可扫描 `.tmp`、`.part`、`.download`、`.crdownload` 等临时下载残留，并统计 0 字节文件、空目录和占用空间。
+- 清理操作增加二次确认，只删除明确的临时下载残留，不删除正常视频/图片文件，降低误删风险。
+- 设置页和兼容设置页的存储区域都增加扫描/清理入口，反馈使用局部状态文本，避免整页重绘。
+- 新增 `tests/test_settings_storage_maintenance.py`，覆盖残留扫描和安全清理逻辑。
+- 验证：`124 passed`，`release_gate: OK`。
 
 ## 1.0.2
 
@@ -105,3 +158,33 @@
 - 视频解析历史升级为解析资源库，保留资源明细、失败明细和失败分类。
 - 内容监控新增异常修复中心和新作品收件箱摘要面板。
 - 新增深度优化测试，验证资源库和异常修复入口。
+
+## 设置模块 P0 拆分优化
+
+- 新增 `app/core/ui_services/settings_service.py`：集中处理设置保存、Cookie 保存、运行时应用。
+- 新增 `app/core/ui_services/settings_validator.py`：集中处理数值范围校验、非法值修正、开发模式覆盖逻辑。
+- 新增 `app/core/ui_services/settings_runtime_apply.py`：集中处理解析器并发、Cookie 池和账号通知的即时生效。
+- 新增 `app/core/ui_services/settings_backup_service.py`：集中处理配置包、完整备份、脱敏备份、导入恢复。
+- 设置页保存后会回填修正后的配置值，并显示变更、生效范围和 Cookie 同步状态。
+- 配置备份区新增“脱敏备份”入口，不导出 Cookie 和 web_auth 登录凭证。
+- 新增 `docs/SETTINGS_MODULE_REFACTOR_PLAN.md`，记录 P0-P3 拆分和优化路线。
+
+
+## 设置模块 P2 Cookie 与代理诊断优化
+
+- 新增 `app/core/ui_services/settings_cookie_service.py`：Cookie 池分析、脱敏展示、重复/无效片段统计、健康状态合并。
+- 新增 `app/core/ui_services/settings_proxy_service.py`：代理格式校验、地址自动规范化、代理连通性测试。
+- 设置页新增“分析 Cookie 池”和“测试全部抖音 Cookie”，不再只能测试第 1 个 Cookie。
+- 设置页代理区域新增“校验代理格式”和“测试代理”，支持 `127.0.0.1:7890` 自动规范为 `http://127.0.0.1:7890`。
+- Cookie 状态展示仅显示脱敏键名、长度和健康状态，不暴露 Cookie 原文。
+- 代理地址校验接入 `settings_validator.py`，保存时会提示代理格式问题或自动规范化结果。
+- 新增 Cookie/代理服务测试，继续通过灰块回归检查。
+
+## P2 Task Center & Download History Optimization
+
+- Download recovery now supports bounded concurrency (1-5) with Task Center progress updates, ETA estimates, and failure-category summaries.
+- Download History now prompts before bulk recovery and lets users choose serial recovery, concurrency 2, or concurrency 3.
+- Download History adds a file-state verification action and clearer recovery-result messages with concurrency, task ID, and failure categories.
+- Task Center details now summarize associated download records, recoverable counts, missing-file counts, and failure categories.
+- Batch task details now group failure reasons by category before showing raw failure IDs/reasons.
+- Web console Download History now supports keyword search, missing-file status, recover-all, export-current-filter, file-state labels, and failure metadata.

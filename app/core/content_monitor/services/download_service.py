@@ -650,7 +650,7 @@ class ContentMonitorDownloadMixin:
         }
         proxy = self.settings.user_config.get("proxy_address") or None if self.settings.user_config.get("enable_proxy") else None
         recovery = getattr(self.services, "download_recovery_service", None)
-        download_id = recovery.start(url=url, save_path=save_path, kind="content_monitor", label=os.path.basename(save_path)) if recovery else ""
+        download_id = recovery.start(url=url, save_path=save_path, kind="content_monitor", label=os.path.basename(save_path), task_id=current_media_task_id()) if recovery else ""
         try:
             await download_http_file(
                 url,

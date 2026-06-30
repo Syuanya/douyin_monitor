@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from ..runtime.operation_models import OperationStatus, normalize_download_status
+
 
 SCHEMA_VERSION = 4
 
@@ -175,6 +177,12 @@ class SQLiteStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_download_records_path
                 ON download_records(save_path)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_download_records_task_id
+                ON download_records(task_id)
                 """
             )
 
@@ -407,6 +415,7 @@ class SQLiteStore:
         download_id = str(record.get("download_id") or uuid.uuid4().hex)
         payload = dict(record)
         payload["download_id"] = download_id
+        payload["status"] = normalize_download_status(payload.get("status") or OperationStatus.PENDING.value)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -436,7 +445,7 @@ class SQLiteStore:
                     str(payload.get("save_path") or ""),
                     str(payload.get("kind") or ""),
                     str(payload.get("label") or ""),
-                    str(payload.get("status") or "pending"),
+                    str(payload.get("status") or OperationStatus.PENDING.value),
                     _safe_int(payload.get("bytes_downloaded"), 0),
                     _safe_int(payload.get("total_bytes"), 0),
                     str(payload.get("error") or ""),
@@ -468,14 +477,14 @@ class SQLiteStore:
 
         self.ensure_schema()
         changed = 0
-        records = self.load_download_records(statuses=["running", "pending"], limit=1000)
+        records = self.load_download_records(statuses=[OperationStatus.RUNNING.value, OperationStatus.PENDING.value], limit=1000)
         for record in records:
             download_id = str(record.get("download_id") or "")
             if not download_id:
                 continue
             self.update_download_record(
                 download_id,
-                status="recoverable",
+                status=OperationStatus.RECOVERABLE.value,
                 error=str(record.get("error") or "interrupted before completion"),
             )
             changed += 1
@@ -488,6 +497,7 @@ class SQLiteStore:
         limit: int = 200,
         offset: int = 0,
         download_id: str = "",
+        task_id: str = "",
         query: str = "",
     ) -> list[dict[str, Any]]:
         self.ensure_schema()
@@ -496,14 +506,18 @@ class SQLiteStore:
         if download_id:
             where.append("download_id = ?")
             params.append(download_id)
+        if task_id:
+            where.append("task_id = ?")
+            params.append(task_id)
         if statuses:
-            placeholders = ",".join("?" for _ in statuses)
+            normalized_statuses = [normalize_download_status(status) for status in statuses]
+            placeholders = ",".join("?" for _ in normalized_statuses)
             where.append(f"status IN ({placeholders})")
-            params.extend(statuses)
+            params.extend(normalized_statuses)
         if query:
-            where.append("(url LIKE ? OR save_path LIKE ? OR kind LIKE ? OR label LIKE ? OR error LIKE ?)")
+            where.append("(url LIKE ? OR save_path LIKE ? OR kind LIKE ? OR label LIKE ? OR error LIKE ? OR task_id LIKE ?)")
             like = f"%{query}%"
-            params.extend([like, like, like, like, like])
+            params.extend([like, like, like, like, like, like])
         clause = " WHERE " + " AND ".join(where) if where else ""
         params.append(max(1, int(limit or 200)))
         params.append(max(0, int(offset or 0)))
@@ -528,16 +542,35 @@ class SQLiteStore:
                 result.append(payload)
         return result
 
-    def download_record_count(self, statuses: list[str] | None = None) -> int:
+    def download_record_count(
+        self,
+        statuses: list[str] | None = None,
+        *,
+        query: str = "",
+        task_id: str = "",
+        download_id: str = "",
+    ) -> int:
         self.ensure_schema()
         params: list[Any] = []
-        where = ""
+        where: list[str] = []
+        if download_id:
+            where.append("download_id = ?")
+            params.append(download_id)
+        if task_id:
+            where.append("task_id = ?")
+            params.append(task_id)
         if statuses:
-            placeholders = ",".join("?" for _ in statuses)
-            where = f" WHERE status IN ({placeholders})"
-            params.extend(statuses)
+            normalized_statuses = [normalize_download_status(status) for status in statuses]
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            where.append(f"status IN ({placeholders})")
+            params.extend(normalized_statuses)
+        if query:
+            where.append("(url LIKE ? OR save_path LIKE ? OR kind LIKE ? OR label LIKE ? OR error LIKE ? OR task_id LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like, like, like, like, like])
+        clause = " WHERE " + " AND ".join(where) if where else ""
         with self.connect() as conn:
-            row = conn.execute(f"SELECT COUNT(*) AS value FROM download_records{where}", params).fetchone()
+            row = conn.execute(f"SELECT COUNT(*) AS value FROM download_records{clause}", params).fetchone()
         return int(row["value"] if row is not None else 0)
 
     def delete_download_records(
@@ -551,9 +584,10 @@ class SQLiteStore:
         where: list[str] = []
         params: list[Any] = []
         if statuses:
-            placeholders = ",".join("?" for _ in statuses)
+            normalized_statuses = [normalize_download_status(status) for status in statuses]
+            placeholders = ",".join("?" for _ in normalized_statuses)
             where.append(f"status IN ({placeholders})")
-            params.extend(statuses)
+            params.extend(normalized_statuses)
         if download_ids:
             placeholders = ",".join("?" for _ in download_ids)
             where.append(f"download_id IN ({placeholders})")

@@ -30,10 +30,10 @@ def test_video_parse_results_support_filter_sort_and_safe_visual_cards() -> None
     assert "self.result_sort = \"input\"" in text
     assert "_filtered_parse_items" in text
     assert "输入顺序" in text
-    assert "结果卡片：已恢复封面/预览位显示" in text
+    assert "结果卡片：已切换为稳定文本卡片" in text
     assert "_result_media_box" in text
-    assert "width=120" in text
-    assert "height=150" in text
+    assert "self.result_list_text_only = True" in text
+    assert "ft.Image(src=" not in text
     assert "create_media_preview" not in text
     assert "显示缩略图" not in text
     assert "ft.ProgressBar(" not in text
@@ -46,7 +46,8 @@ def test_video_parse_batch_download_can_be_cancelled_with_progress_panel() -> No
     assert "cancel_batch_download" in text
     assert "停止下载" in text
     assert "_batch_download_progress_panel" in text
-    assert "批量下载已停止" in text
+    assert "_update_result_status_only" in text
+    assert "已停止" in text
 
 
 def test_content_monitor_new_work_cards_keep_bounded_covers() -> None:

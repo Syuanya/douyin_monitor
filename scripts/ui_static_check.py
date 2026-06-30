@@ -347,6 +347,35 @@ def main() -> int:
         errors.append("settings download strategy apply button missing")
     if "parse_cookie_pool(raw_douyin_cookie)" not in settings_text:
         errors.append("settings page should parse and sanitize Douyin Cookie pool before saving")
+    for marker in ("SettingsPresetService", "apply_runtime_preset", "运行模式预设", "稳定长期运行", "高速批量处理", "开发诊断模式"):
+        if marker not in settings_text:
+            errors.append(f"settings runtime preset marker missing: {marker}")
+
+    try:
+        settings_tree = ast.parse(settings_view_text)
+        for node in ast.walk(settings_tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "TextField"):
+                continue
+            value = func.value
+            if not (isinstance(value, ast.Name) and value.id == "ft"):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "expand" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
+                    errors.append(f"settings TextField must not use expand=True; it can stretch into a grey block on Windows: line {getattr(node, 'lineno', '?')}")
+    except SyntaxError as exc:
+        errors.append(f"settings_view syntax error while checking TextField expand: {exc}")
+    if "# Windows/Flet WebView2 stability guard: do not let TextField use expand=True" not in settings_view_text:
+        errors.append("settings TextField grey-block stability guard comment missing")
+    if "WIDE_FIELD_WIDTH" not in settings_view_text or "SINGLE_LINE_FIELD_HEIGHT" not in settings_view_text:
+        errors.append("settings bounded wide TextField constants missing")
+    if "ft.Switch" in settings_view_text:
+        errors.append("settings page must not use native ft.Switch; use bounded toggle buttons to reduce Windows grey-block risk")
+    for marker in ("_make_toggle_button", "_toggle_values", "ACCOUNT_NOTIFY_PAGE_SIZE", "filter_account_notify_list", "set_filtered_account_notify"):
+        if marker not in settings_view_text:
+            errors.append(f"settings P3 stable toggle/account-list marker missing: {marker}")
 
     diagnostic_text = (ROOT / "app/ui/views/diagnostic_health_view.py").read_text(encoding="utf-8")
     for marker in ("check_python_runtime", "check_disk_space", "check_download_strategy", "_safe_int_config", "sanitize_cookie_header", "shutil.disk_usage"):

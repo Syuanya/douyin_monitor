@@ -136,9 +136,46 @@ class WebRuntime:
             results.append({"account_id": account_id, **result})
         return {"success": all(item.get("success") for item in results), "total": len(results), "results": results}
 
-    def download_history_records(self, *, status: str = "all", limit: int = 100) -> dict[str, Any]:
-        records = self.download_history.records(status_filter=status, limit=limit)
-        return {"counts": self.download_history.counts(), "records": records}
+    def download_history_records(self, *, status: str = "all", limit: int = 100, query: str = "", offset: int = 0) -> dict[str, Any]:
+        records = self.download_history.records(status_filter=status, limit=limit, query=query, offset=offset)
+        enriched = []
+        for record in records:
+            item = dict(record)
+            item["file_state"] = self.download_history.file_state_label(record)
+            meta = self.download_history.failure_meta(record)
+            if meta:
+                item["failure_category"] = meta.get("category")
+                item["failure_next_step"] = meta.get("next_step")
+            enriched.append(item)
+        return {
+            "counts": self.download_history.counts(query=query),
+            "total": self.download_history.count(status, query=query),
+            "status": status,
+            "query": query,
+            "offset": max(0, int(offset or 0)),
+            "limit": max(1, int(limit or 100)),
+            "records": enriched,
+        }
+
+    async def download_history_recover_all(self, *, concurrency: int = 2) -> dict[str, Any]:
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyin.com/"}
+        settings = getattr(self.services, "settings_config", None)
+        cookies = getattr(settings, "cookies_config", {}) if settings is not None else {}
+        cookie = str((cookies or {}).get("douyin_cookie") or "").strip()
+        if cookie:
+            headers["Cookie"] = cookie
+        config = getattr(settings, "user_config", {}) if settings is not None else {}
+        proxy = str(config.get("proxy_address") or "").strip() or None if config.get("enable_proxy") else None
+        resume_enabled = bool(config.get("download_resume_enabled", True))
+        return await self.download_history.recover_all(headers=headers, proxy=proxy, resume_enabled=resume_enabled, concurrency=concurrency)
+
+    def download_history_export(self, *, status: str = "all", query: str = "") -> dict[str, Any]:
+        total = self.download_history.count(status, query=query)
+        records = self.download_history.records(status_filter=status, limit=max(1, total), query=query)
+        if not records:
+            return {"success": False, "reason": "暂无下载记录可导出", "total": 0}
+        path = self.download_history.export_csv(records)
+        return {"success": True, "path": path, "total": len(records), "status": status, "query": query}
 
     def batch_import_preview(self, text: str, default_group: str = "", source: str = "web") -> dict[str, Any]:
         preview = parse_batch_import_text(
@@ -908,10 +945,18 @@ class WebRuntime:
 
     def cancel_task_record(self, task_id: str) -> dict[str, Any]:
         center = getattr(self.services, "task_center", None)
-        if center is None or not hasattr(center, "cancel"):
+        if center is None or not hasattr(center, "snapshot"):
             return {"success": False, "reason": "任务中心不可用"}
-        center.cancel(task_id, "用户在 Web 端取消任务记录")
-        return {"success": True, "reason": "任务记录已标记取消；已运行的底层下载可能需使用队列取消。"}
+        record = next((r for r in center.snapshot(500) if str(r.get("task_id") or "") == str(task_id)), None)
+        if not record:
+            return {"success": False, "reason": "任务不存在"}
+        status = str(record.get("status") or "")
+        if status in {"运行中", "等待中", "running", "pending"}:
+            return {"success": False, "reason": "该任务仍在运行或等待，不能只取消记录；请使用下载队列取消，避免界面状态和真实执行状态不一致。"}
+        if not hasattr(center, "cancel"):
+            return {"success": False, "reason": "任务中心不支持标记取消"}
+        center.cancel(task_id, "用户在 Web 端标记取消历史任务")
+        return {"success": True, "reason": "仅历史任务记录已标记取消。运行中任务请使用下载队列取消。"}
 
     async def retry_task_record(self, task_id: str) -> dict[str, Any]:
         record = next((r for r in self.task_center.records(500) if str(r.get("task_id")) == str(task_id)), None)

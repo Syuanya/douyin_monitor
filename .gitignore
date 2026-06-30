@@ -20,6 +20,9 @@ data/
 logs/
 downloads/
 diagnostics/
+cache/
+backups/
+config/backups/
 dist/
 build/
 tmp/

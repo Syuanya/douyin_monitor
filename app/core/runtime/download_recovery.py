@@ -6,13 +6,15 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
+from .operation_models import OperationStatus, normalize_download_status
 
-DOWNLOAD_STATUS_PENDING = "pending"
-DOWNLOAD_STATUS_RUNNING = "running"
-DOWNLOAD_STATUS_COMPLETED = "completed"
-DOWNLOAD_STATUS_FAILED = "failed"
-DOWNLOAD_STATUS_CANCELLED = "cancelled"
-DOWNLOAD_STATUS_RECOVERABLE = "recoverable"
+
+DOWNLOAD_STATUS_PENDING = OperationStatus.PENDING.value
+DOWNLOAD_STATUS_RUNNING = OperationStatus.RUNNING.value
+DOWNLOAD_STATUS_COMPLETED = OperationStatus.COMPLETED.value
+DOWNLOAD_STATUS_FAILED = OperationStatus.FAILED.value
+DOWNLOAD_STATUS_CANCELLED = OperationStatus.CANCELLED.value
+DOWNLOAD_STATUS_RECOVERABLE = OperationStatus.RECOVERABLE.value
 
 
 @dataclass(slots=True)
@@ -34,11 +36,12 @@ class DownloadRecord:
 
 
 class DownloadRecoveryService:
-    """Persist download attempts so interrupted .part files are recoverable.
+    """Compatibility facade for the historical recovery registry.
 
-    The service deliberately does not spawn network work by itself. It records
-    enough state for UI/task-center retry flows and for startup health checks to
-    surface recoverable downloads after an application crash or forced exit.
+    New runtime code uses ``download_recovery_service.DownloadRecoveryService``
+    for actual recovery execution. This class remains as a thin status-record
+    adapter for older tests and callers while sharing canonical operation status
+    constants from ``operation_models``.
     """
 
     def __init__(self, sqlite_store: Any | None = None, *, max_records: int = 1000):
@@ -83,7 +86,7 @@ class DownloadRecoveryService:
         record = self.get(download_id)
         if record is None:
             return
-        record.status = DOWNLOAD_STATUS_RUNNING
+        record.status = normalize_download_status(DOWNLOAD_STATUS_RUNNING)
         record.bytes_downloaded = max(0, int(bytes_downloaded or 0))
         record.total_bytes = max(0, int(total_bytes or 0))
         record.updated_at = self._now()
@@ -95,7 +98,7 @@ class DownloadRecoveryService:
             return
         now = self._now()
         final_size = self._file_size(record.save_path)
-        record.status = DOWNLOAD_STATUS_COMPLETED
+        record.status = normalize_download_status(DOWNLOAD_STATUS_COMPLETED)
         record.bytes_downloaded = final_size or record.bytes_downloaded
         record.total_bytes = final_size or record.total_bytes
         record.error = ""
@@ -109,7 +112,7 @@ class DownloadRecoveryService:
             return
         now = self._now()
         part_size = self._part_size(record.save_path)
-        record.status = DOWNLOAD_STATUS_RECOVERABLE if recoverable and part_size > 0 else DOWNLOAD_STATUS_FAILED
+        record.status = normalize_download_status(DOWNLOAD_STATUS_RECOVERABLE if recoverable and part_size > 0 else DOWNLOAD_STATUS_FAILED)
         record.bytes_downloaded = part_size or record.bytes_downloaded
         record.error = str(error or "download failed")
         record.updated_at = now
@@ -120,7 +123,7 @@ class DownloadRecoveryService:
         record = self.get(download_id)
         if record is None:
             return
-        record.status = DOWNLOAD_STATUS_RECOVERABLE if self._part_size(record.save_path) > 0 else DOWNLOAD_STATUS_CANCELLED
+        record.status = normalize_download_status(DOWNLOAD_STATUS_RECOVERABLE if self._part_size(record.save_path) > 0 else DOWNLOAD_STATUS_CANCELLED)
         record.updated_at = self._now()
         self._save_record(record)
 

@@ -22,7 +22,7 @@ from ...media.image_urls import deduplicate_image_urls
 from ...media.parser_models import ParsedVideoResult
 from ...media.resumable_download import download_http_file
 from ...parser import build_douyin_parser_backend
-from ...runtime.media_task_queue import report_media_task_progress
+from ...runtime.media_task_queue import current_media_task_id, report_media_task_progress
 from ....utils.logger import logger
 from ..models import DouyinContentItem, DouyinMonitorAccount
 

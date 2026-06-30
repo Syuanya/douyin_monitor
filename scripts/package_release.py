@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -29,6 +30,7 @@ EXCLUDED_RUNTIME_DIRS_ANYWHERE = {
 }
 
 EXCLUDED_TOP_LEVEL_DIRS = {
+    "backups",
     "cache",
     "build",
     "data",
@@ -72,6 +74,8 @@ def should_include(path: Path) -> bool:
         return False
     if rel.parts and rel.parts[0] in EXCLUDED_TOP_LEVEL_DIRS:
         return False
+    if len(rel.parts) >= 2 and rel.parts[0] == "config" and rel.parts[1] == "backups":
+        return False
     if path.name in ALWAYS_EXCLUDE_FILES:
         return False
     if path.suffix in EXCLUDED_SUFFIXES:
@@ -107,7 +111,9 @@ def inspect_zip(zip_path: Path) -> list[str]:
                 problems.append(name)
             if len(item.parts) >= 2 and item.parts[0] == "config" and item.name in RUNTIME_CONFIG_FILES:
                 problems.append(name)
-            if item.parts and item.parts[0] in {"data", "logs", "downloads", "diagnostics"}:
+            if item.parts and item.parts[0] in {"backups", "cache", "data", "logs", "downloads", "diagnostics"}:
+                problems.append(name)
+            if len(item.parts) >= 2 and item.parts[0] == "config" and item.parts[1] == "backups":
                 problems.append(name)
             if set(item.parts) & EXCLUDED_RUNTIME_DIRS_ANYWHERE:
                 problems.append(name)
@@ -116,10 +122,33 @@ def inspect_zip(zip_path: Path) -> list[str]:
     return problems
 
 
+def read_project_version() -> str:
+    version_file = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    code = (ROOT / "app" / "core" / "version.py").read_text(encoding="utf-8")
+    match = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', code)
+    code_version = match.group(1) if match else ""
+    if not version_file or version_file != code_version:
+        raise ValueError(f"version mismatch: VERSION={version_file!r}, APP_VERSION={code_version!r}")
+    return version_file
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Create a safe Douyin Monitor release archive.")
     parser.add_argument("--name", default="douyin_monitor_release.zip", help="Output zip filename inside dist/")
+    parser.add_argument("--version", default="", help="Optional version assertion for CI/release workflows.")
     args = parser.parse_args()
+
+    try:
+        project_version = read_project_version()
+    except ValueError as exc:
+        print(f"package_release: {exc}", file=sys.stderr)
+        return 1
+    if args.version and args.version.lstrip("vV") != project_version.lstrip("vV"):
+        print(
+            f"package_release: requested version {args.version!r} does not match project version {project_version!r}",
+            file=sys.stderr,
+        )
+        return 1
 
     if not args.name.endswith(".zip"):
         print("package_release: output name must end with .zip", file=sys.stderr)

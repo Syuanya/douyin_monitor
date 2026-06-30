@@ -7,6 +7,39 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+RUNTIME_CONFIG_FILES = {
+    "accounts.json",
+    "cookies.json",
+    "cookies.secure.json",
+    "cookie_health.json",
+    "douyin_content_monitor.json",
+    "parse_history.json",
+    "recordings.json",
+    "task_records.json",
+    "user_settings.json",
+    "web_auth.json",
+}
+
+
+def clean_runtime_artifacts() -> None:
+    """Remove runtime files that tests may create before strict smoke checks."""
+    config_dir = ROOT / "config"
+    for name in RUNTIME_CONFIG_FILES:
+        path = config_dir / name
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    for runtime_dir in (ROOT / "data", ROOT / "backups", ROOT / "cache"):
+        if runtime_dir.exists():
+            for path in runtime_dir.rglob("*"):
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
 
 def run(cmd: list[str], *, optional: bool = False) -> bool:
     print("+ " + " ".join(cmd))
@@ -29,10 +62,12 @@ def main() -> int:
     args = parser.parse_args()
 
     run([sys.executable, "-m", "compileall", "-q", "app", "crawlers", "scripts", "tests", "main.py"])
+    run([sys.executable, "scripts/version_check.py"])
     if args.with_ruff:
         run([sys.executable, "-m", "ruff", "check", "app", "crawlers", "scripts", "tests"], optional=True)
     if not args.skip_tests:
         run([sys.executable, "scripts/run_tests.py"])
+    clean_runtime_artifacts()
     run([sys.executable, "scripts/smoke_check.py", "--strict"])
     run([sys.executable, "scripts/ui_static_check.py"])
     run([sys.executable, "scripts/ui_layout_regression_check.py"])

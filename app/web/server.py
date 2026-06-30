@@ -88,6 +88,15 @@ class StoragePathsRequest(BaseModel):
     paths: list[str] = Field(default_factory=list)
 
 
+class DownloadHistoryRecoverRequest(BaseModel):
+    concurrency: int = 2
+
+
+class DownloadHistoryExportRequest(BaseModel):
+    status: str = "all"
+    query: str = ""
+
+
 class CookiePatchRequest(BaseModel):
     platform: str = "douyin"
     cookie_text: str = ""
@@ -508,13 +517,21 @@ def create_app(run_path: str | None = None) -> FastAPI:
         return StreamingResponse(events(), media_type="text/event-stream")
 
     @app.get("/api/tasks", dependencies=[auth])
-    async def tasks(limit: int = 80, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
-        records = rt.services.task_center.snapshot(limit)
-        return {"total": len(records), "records": records, "web_jobs": await rt.jobs.snapshot(limit)}
+    async def tasks(limit: int = 80, status: str = "all", query: str = "", rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        records = rt.task_center.filter_records(rt.task_center.records(max(limit, 500)), status, query)
+        return {"total": len(records), "status": status, "query": query, "records": records[: max(1, int(limit or 80))], "web_jobs": await rt.jobs.snapshot(limit)}
 
     @app.get("/api/download-history", dependencies=[auth])
-    async def download_history(status: str = "all", limit: int = 100, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
-        return rt.download_history_records(status=status, limit=limit)
+    async def download_history(status: str = "all", limit: int = 100, query: str = "", offset: int = 0, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.download_history_records(status=status, limit=limit, query=query, offset=offset)
+
+    @app.post("/api/download-history/recover-all", dependencies=[auth])
+    async def download_history_recover_all(payload: DownloadHistoryRecoverRequest, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return await rt.download_history_recover_all(concurrency=payload.concurrency)
+
+    @app.post("/api/download-history/export", dependencies=[auth])
+    async def download_history_export(payload: DownloadHistoryExportRequest, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.download_history_export(status=payload.status, query=payload.query)
 
     @app.get("/api/jobs", dependencies=[auth])
     async def jobs(limit: int = 80, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:

@@ -35,9 +35,11 @@ class VideoParsePage(PageBase):
         self.cancel_button: ft.OutlinedButton | None = None
         self.last_result: VideoParseBatchResult | None = None
         self.result_controls: list[ft.Control] = []
+        self.result_status_text: ft.Text | None = None
+        self.batch_download_status_text: ft.Text | None = None
         self.result_render_limit = 80
-        # 结果列表使用安全媒体卡片：图片/视频封面只在固定尺寸容器内显示。
-        self.result_list_text_only = False
+        # 结果列表不直接加载远程封面，避免 Windows Flet/WebView2 在下载刷新时渲染成灰色占位。
+        self.result_list_text_only = True
         self.show_all_results = False
         self.result_filter = "all"
         self.result_sort = "input"
@@ -88,6 +90,20 @@ class VideoParsePage(PageBase):
             controls=[],
             spacing=10,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+        self.result_status_text = ft.Text(
+            "",
+            size=13,
+            color=ft.Colors.PRIMARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self.batch_download_status_text = ft.Text(
+            "",
+            size=12,
+            color=ft.Colors.PRIMARY,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
         self.loading_indicator = ft.ProgressRing(width=22, height=22, stroke_width=3, visible=False)
         self.submit_button = ft.FilledButton("开始解析", icon=ft.Icons.TRAVEL_EXPLORE, on_click=lambda e: self.run_async(self.submit()))
@@ -465,13 +481,10 @@ class VideoParsePage(PageBase):
         self.result_controls.clear()
         filtered_successes, filtered_failures = self._filtered_parse_items(result)
         total_visible_items = len(filtered_successes) + len(filtered_failures)
-        header_controls: list[ft.Control] = [
-            ft.Text(
-                self.parse_progress_text or f"解析结果：成功 {result.success_count} / 失败 {result.failed_count} / 总数 {result.total_count}",
-                size=13,
-                color=ft.Colors.PRIMARY,
-            )
-        ]
+        if self.result_status_text is None:
+            self.result_status_text = ft.Text("", size=13, color=ft.Colors.PRIMARY, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+        self.result_status_text.value = self.parse_progress_text or f"解析结果：成功 {result.success_count} / 失败 {result.failed_count} / 总数 {result.total_count}"
+        header_controls: list[ft.Control] = [self.result_status_text]
         if result.successes:
             header_controls.append(ft.OutlinedButton("复制作品链接", icon=ft.Icons.LINK, disabled=self._batch_download_running, on_click=lambda e: self.run_async(self.copy_all_work_links())))
             header_controls.append(ft.OutlinedButton("复制直链", icon=ft.Icons.COPY_ALL, disabled=self._batch_download_running, on_click=lambda e: self.run_async(self.copy_all_results())))
@@ -527,9 +540,10 @@ class VideoParsePage(PageBase):
                     content=ft.Row(
                         controls=[
                             ft.Icon(ft.Icons.VIEW_MODULE, size=16, color=ft.Colors.PRIMARY),
-                            ft.Text("结果卡片：已恢复封面/预览位显示；图片固定尺寸加载，避免撑出灰色大块。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                            ft.Text("结果卡片：已切换为稳定文本卡片；封面不在列表内直接加载，避免下载刷新后出现灰色遮挡。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                         ],
                         spacing=6,
+                        wrap=True,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                 )
@@ -796,18 +810,48 @@ class VideoParsePage(PageBase):
     def _result_key(item: ParsedVideoResult) -> str:
         return normalize_work_url(item.source_url or "") or item.item_id or item.primary_media_url or str(id(item))
 
-    def _batch_download_progress_panel(self) -> ft.Container:
-        """Return a compact text-only batch download panel.
-
-        Do not use ft.ProgressBar here. In the Windows Flet/WebView2 desktop
-        runtime used by this project, ProgressBar can render as a full-width
-        grey rectangle after batch download status changes, which hides parsed
-        result cards. A text-only progress row is stable and still gives clear
-        feedback.
-        """
+    def _batch_progress_message(self) -> str:
         total = max(0, int(self.batch_download_total or 0))
         completed = max(0, int(self.batch_download_completed or 0))
         percent = int((completed / total) * 100) if total else 0
+        return (
+            f"正在下载：{completed}/{total}（{percent}%），"
+            f"成功 {self.batch_download_success}，已存在 {self.batch_download_skipped}，失败 {self.batch_download_failed}"
+        )
+
+    def _update_result_status_only(self) -> None:
+        """Update mounted status texts without rebuilding result cards.
+
+        Batch download used to call render_result() on every progress tick. That
+        recreated every result card and reloaded remote thumbnails, which is the
+        main trigger for the grey WebView2 block. Keep progress feedback, but
+        only update the already mounted Text controls during a running batch.
+        """
+        if not self._is_active_page():
+            return
+        try:
+            if self.result_status_text is not None:
+                self.result_status_text.value = self.parse_progress_text or self.result_status_text.value
+                self.result_status_text.update()
+        except Exception as exc:
+            logger.debug(f"update parse status text failed: {exc}")
+        try:
+            if self.batch_download_status_text is not None:
+                self.batch_download_status_text.value = self._batch_progress_message()
+                self.batch_download_status_text.update()
+        except Exception as exc:
+            logger.debug(f"update batch status text failed: {exc}")
+
+    def _batch_download_progress_panel(self) -> ft.Container:
+        """Return a compact text-only batch download panel.
+
+        Do not use ft.ProgressBar or remote media here. In Windows Flet/WebView2,
+        repeated progress redraws can render as a full-width grey rectangle and
+        hide parsed result cards.
+        """
+        if self.batch_download_status_text is None:
+            self.batch_download_status_text = ft.Text("", size=12, color=ft.Colors.PRIMARY, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS)
+        self.batch_download_status_text.value = self._batch_progress_message()
         return ft.Container(
             padding=8,
             border=ft.Border.all(1, ft.Colors.PRIMARY_CONTAINER),
@@ -815,11 +859,7 @@ class VideoParsePage(PageBase):
             content=ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.DOWNLOADING, size=16, color=ft.Colors.PRIMARY),
-                    ft.Text(
-                        f"正在下载：{completed}/{total}（{percent}%），成功 {self.batch_download_success}，已存在 {self.batch_download_skipped}，失败 {self.batch_download_failed}",
-                        size=12,
-                        color=ft.Colors.PRIMARY,
-                    ),
+                    self.batch_download_status_text,
                     ft.TextButton("停止下载", icon=ft.Icons.STOP_CIRCLE, on_click=lambda e: self.run_async(self.cancel_batch_download())),
                 ],
                 spacing=8,
@@ -952,46 +992,38 @@ class VideoParsePage(PageBase):
         return ""
 
     def _result_media_box(self, item: ParsedVideoResult) -> ft.Container:
-        """Create a bounded media preview that cannot expand over the result card.
+        """Create a small text/icon media marker without remote Image controls.
 
-        This intentionally follows the older stable card layout: the media area is
-        small and fixed, and it never uses expand/stretch/selectable long text.
-        Some Windows WebView2/Flet builds render expanded columns or media boxes
-        as a large grey rectangle, so the preview must stay isolated.
+        The result list must stay stable while batch downloads update progress.
+        Remote ft.Image thumbnails are intentionally not mounted here because
+        WebView2 can turn them into large grey placeholders after repeated UI
+        updates. Full media remains available through the preview buttons.
         """
         image_urls = item.image_urls or item.watermark_image_urls or []
         is_gallery = item.media_type == "image" or bool(image_urls)
-        cover_url = self._result_cover_url(item)
         icon_name = ft.Icons.IMAGE_OUTLINED if is_gallery else ft.Icons.PLAY_ARROW
-        fallback = ft.Container(
-            width=120,
-            height=150,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            alignment=ft.Alignment(0, 0),
-            content=ft.Icon(icon_name, size=42, color=ft.Colors.TEAL),
-        )
-        content: ft.Control
-        if cover_url:
-            content = ft.Image(src=cover_url, width=120, height=150, fit=ft.BoxFit.COVER)
-        else:
-            content = fallback
+        label = f"图集 {len(image_urls)} 张" if is_gallery else "视频"
         return ft.Container(
-            width=120,
-            height=150,
-            border_radius=8,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-            alignment=ft.Alignment(0, 0),
-            content=content,
+            border_radius=8,
+            padding=ft.Padding.only(left=8, top=6, right=8, bottom=6),
+            content=ft.Row(
+                controls=[
+                    ft.Icon(icon_name, size=16, color=ft.Colors.TEAL),
+                    ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                ],
+                spacing=6,
+                wrap=True,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
         )
 
     def create_result_card(self, item: ParsedVideoResult, order_label: str = "", display_index: int = 0) -> ft.Container:
-        """Create a stable visual result card.
+        """Create a stable text-first result card.
 
-        The right side deliberately does not use expand=True. The previous card
-        used an expanded Column/Text next to the media box; on the user's Windows
-        desktop runtime that expanded region was painted as a huge grey block.
+        This card avoids expand=True, selectable long text, remote images and
+        full-list redraw dependencies. Those are the four patterns that caused
+        the user's parsed result area to become a grey block after downloads.
         """
         item_key = self._result_key(item)
         image_urls = item.image_urls or item.watermark_image_urls or []
@@ -1003,12 +1035,13 @@ class VideoParsePage(PageBase):
         is_gallery = item.media_type == "image" or bool(image_urls)
 
         detail_controls: list[ft.Control] = [
+            self._result_media_box(item),
             ft.Text(f"作品 ID：{item.item_id or '-'}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ft.Text(f"作者：{item.author_nickname or '-'}  {item.author_id or ''}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
             ft.Text(self._short_url(work_url, 110) if work_url else "未获取到作品链接", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
         ]
         if is_gallery:
-            detail_controls.append(ft.Text(f"图集图片：{len(image_urls)} 张", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
+            detail_controls.append(ft.Text(f"图集图片：{len(image_urls)} 张，可点预览图集查看。", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
         elif item.media_type == "video":
             quality_hint = "无水印" if item.no_watermark_url else ("有水印" if item.watermark_url else "未获取到直链")
             detail_controls.append(ft.Text(f"视频状态：{quality_hint}", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
@@ -1046,24 +1079,18 @@ class VideoParsePage(PageBase):
             ]
         )
 
-        info_column = ft.Column(
-            controls=[
-                ft.Row(controls=title_row_controls, wrap=True, vertical_alignment=ft.CrossAxisAlignment.START),
-                *detail_controls,
-                ft.Row(controls=actions, wrap=True, spacing=8),
-            ],
-            spacing=7,
-        )
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=8,
             padding=12,
             bgcolor=ft.Colors.SURFACE,
-            content=ft.Row(
-                controls=[self._result_media_box(item), info_column],
-                spacing=12,
-                wrap=False,
-                vertical_alignment=ft.CrossAxisAlignment.START,
+            content=ft.Column(
+                controls=[
+                    ft.Row(controls=title_row_controls, wrap=True, vertical_alignment=ft.CrossAxisAlignment.START),
+                    *detail_controls,
+                    ft.Row(controls=actions, wrap=True, spacing=8),
+                ],
+                spacing=7,
             ),
         )
 
@@ -1212,7 +1239,8 @@ class VideoParsePage(PageBase):
 
     def show_download_complete_dialog(self, path: str, reason: str = "下载完成", files: list[str] | None = None) -> None:
         target_path = str(path or "").strip()
-        file_count_text = f"\n文件数：{len(files)}" if files else ""
+        file_count_text = f"文件数：{len(files)}" if files else ""
+        short_target_path = self._short_url(target_path, 120)
         dialog_ref: dict[str, ft.AlertDialog | None] = {"dialog": None}
 
         def close_dialog(_=None):
@@ -1234,8 +1262,9 @@ class VideoParsePage(PageBase):
             title=ft.Text("下载完成"),
             content=ft.Column(
                 controls=[
-                    ft.Text(reason, size=13),
-                    ft.Text(f"保存位置：{target_path}{file_count_text}", selectable=True, size=12),
+                    ft.Text(reason, size=13, max_lines=4, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"保存位置：{short_target_path}", size=12, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(file_count_text, size=12, color=ft.Colors.ON_SURFACE_VARIANT, visible=bool(file_count_text)),
                 ],
                 tight=True,
                 width=680,
@@ -1303,118 +1332,56 @@ class VideoParsePage(PageBase):
             label = "视频" if media_filter == "video" else "图集" if media_filter == "image" else "结果"
             await self.app.snack_bar.show_snack_bar(f"没有可下载的{label}", bgcolor=ft.Colors.ERROR)
             return
-        self._batch_download_running = True
-        self._batch_download_cancel_requested = False
-        await self.set_loading(True)
-        total = len(items)
-        self.batch_download_total = total
-        self.batch_download_completed = 0
-        self.batch_download_success = 0
-        self.batch_download_failed = 0
-        self.batch_download_skipped = 0
-        success_count = 0
-        failed_count = 0
-        skipped_count = 0
-        paths: list[str] = []
-        files: list[str] = []
-        errors: list[str] = []
-        last_render = 0.0
-        try:
-            for index, item in enumerate(items, start=1):
-                if self._batch_download_cancel_requested:
-                    self.parse_progress_text = f"批量下载已停止：已处理 {self.batch_download_completed}/{total}"
-                    break
-                title = item.description or item.item_id or item.source_url
-                self.parse_progress_text = f"批量下载：{index}/{total} · {title}"
-                now = time.monotonic()
-                if now - last_render >= 0.5 or index == 1:
-                    last_render = now
-                    if self.last_result:
-                        self.render_result(self.last_result)
-                try:
-                    result = await self.app.services.parsed_media_downloader.download(item)
-                except Exception as exc:
-                    failed_count += 1
-                    self.batch_download_failed = failed_count
-                    errors.append(f"{title}: {exc}")
-                    self.batch_download_completed = success_count + skipped_count + failed_count
-                    continue
-                if result.get("success"):
-                    reason = str(result.get("reason") or "")
-                    if "已存在" in reason:
-                        skipped_count += 1
-                    else:
-                        success_count += 1
-                    self.batch_download_success = success_count
-                    self.batch_download_skipped = skipped_count
-                    path = str(result.get("path") or "")
-                    if path:
-                        paths.append(path)
-                    files.extend(str(path) for path in (result.get("files") or []) if path)
-                else:
-                    failed_count += 1
-                    self.batch_download_failed = failed_count
-                    errors.append(f"{title}: {result.get('reason') or '下载失败'}")
-                self.batch_download_completed = success_count + skipped_count + failed_count
-            stopped_prefix = "批量下载已停止" if self._batch_download_cancel_requested else "批量下载完成"
-            self.parse_progress_text = f"{stopped_prefix}：成功 {success_count}，已存在 {skipped_count}，失败 {failed_count}"
-            if self.last_result:
-                self.render_result(self.last_result)
-            if paths:
-                location = self._common_download_location(paths)
-                summary = self.parse_progress_text
-                if errors:
-                    summary += "\n" + "\n".join(errors[:5])
-                self.show_download_complete_dialog(location, summary, files)
-            await self.app.snack_bar.show_snack_bar(
-                self.parse_progress_text,
-                bgcolor=ft.Colors.PRIMARY if failed_count == 0 else ft.Colors.ERROR,
-                duration=6000,
-                show_close_icon=True,
-            )
-        finally:
-            self._batch_download_running = False
-            self._batch_download_cancel_requested = False
-            await self.set_loading(False)
-            if self.last_result:
-                self.render_result(self.last_result)
+        await self._batch_download_items(items, title_prefix="批量下载")
 
     async def _batch_download_items(self, items: list[ParsedVideoResult], *, title_prefix: str = "批量下载") -> None:
+        if self._batch_download_running:
+            await self.app.snack_bar.show_snack_bar("批量下载正在执行，请等待完成", bgcolor=ft.Colors.ERROR)
+            return
         self._batch_download_running = True
         self._batch_download_cancel_requested = False
-        await self.set_loading(True)
         total = len(items)
         self.batch_download_total = total
         self.batch_download_completed = 0
         self.batch_download_success = 0
         self.batch_download_failed = 0
         self.batch_download_skipped = 0
+        self.parse_progress_text = f"{title_prefix}准备开始：共 {total} 个资源"
+        await self.set_loading(True)
+        if self.last_result:
+            self.render_result(self.last_result)
         success_count = 0
         failed_count = 0
         skipped_count = 0
         paths: list[str] = []
         files: list[str] = []
         errors: list[str] = []
-        last_render = 0.0
+        last_status_update = 0.0
         try:
             for index, item in enumerate(items, start=1):
                 if self._batch_download_cancel_requested:
                     self.parse_progress_text = f"{title_prefix}已停止：已处理 {self.batch_download_completed}/{total}"
+                    self._update_result_status_only()
                     break
                 title = item.description or item.item_id or item.source_url
                 self.parse_progress_text = f"{title_prefix}：{index}/{total} · {title}"
                 now = time.monotonic()
-                if now - last_render >= 0.5 or index == 1:
-                    last_render = now
-                    if self.last_result:
-                        self.render_result(self.last_result)
+                if index == 1 or now - last_status_update >= 0.2:
+                    last_status_update = now
+                    self._update_result_status_only()
                 try:
                     result = await self.app.services.parsed_media_downloader.download(item)
+                except asyncio.CancelledError:
+                    self._batch_download_cancel_requested = True
+                    self.parse_progress_text = f"{title_prefix}已取消：已处理 {self.batch_download_completed}/{total}"
+                    self._update_result_status_only()
+                    break
                 except Exception as exc:
                     failed_count += 1
                     self.batch_download_failed = failed_count
                     errors.append(f"{title}: {exc}")
                     self.batch_download_completed = success_count + skipped_count + failed_count
+                    self._update_result_status_only()
                     continue
                 if result.get("success"):
                     reason = str(result.get("reason") or "")
@@ -1433,10 +1400,10 @@ class VideoParsePage(PageBase):
                     self.batch_download_failed = failed_count
                     errors.append(f"{title}: {result.get('reason') or '下载失败'}")
                 self.batch_download_completed = success_count + skipped_count + failed_count
+                self._update_result_status_only()
             stopped_prefix = f"{title_prefix}已停止" if self._batch_download_cancel_requested else f"{title_prefix}完成"
             self.parse_progress_text = f"{stopped_prefix}：成功 {success_count}，已存在 {skipped_count}，失败 {failed_count}"
-            if self.last_result:
-                self.render_result(self.last_result)
+            self._update_result_status_only()
             if paths:
                 location = self._common_download_location(paths)
                 summary = self.parse_progress_text
@@ -1462,8 +1429,7 @@ class VideoParsePage(PageBase):
             return
         self._batch_download_cancel_requested = True
         self.parse_progress_text = "正在停止批量下载，当前文件处理完成后结束..."
-        if self.last_result:
-            self.render_result(self.last_result)
+        self._update_result_status_only()
         await self.app.snack_bar.show_snack_bar("已请求停止批量下载", bgcolor=ft.Colors.PRIMARY)
 
     @staticmethod
@@ -1564,7 +1530,7 @@ class VideoParsePage(PageBase):
             modal=True,
             title=ft.Text("解析资源库"),
             content=ft.Column(
-                controls=[ft.Text("\n".join(lines), selectable=True, size=12)],
+                controls=[ft.Text("\n".join(lines), size=12)],
                 tight=True,
                 width=820,
                 scroll=ft.ScrollMode.AUTO,

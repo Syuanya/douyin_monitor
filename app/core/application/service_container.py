@@ -39,7 +39,7 @@ class DouyinMonitorServices:
             sqlite_store=self.sqlite_store,
         )
         self.health_check_service = HealthCheckService(self)
-        self.download_recovery_service = DownloadRecoveryService(self.sqlite_store)
+        self.download_recovery_service = DownloadRecoveryService(self.sqlite_store, task_center=self.task_center)
         self.download_recovery_service.initialize_recovery_state()
         self.download_http_client_pool = DownloadHttpClientPool()
         self.cookie_health_store = CookieHealthStore(

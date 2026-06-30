@@ -17,6 +17,13 @@ _CURRENT_QUEUE: contextvars.ContextVar["MediaTaskQueue | None"] = contextvars.Co
 _CURRENT_TASK_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("douyin_current_media_task_id", default=None)
 
 
+
+
+def current_media_task_id() -> str:
+    """Return the TaskCenter task id bound to the currently running media queue work."""
+    return str(_CURRENT_TASK_ID.get() or "")
+
+
 def report_media_task_progress(detail: str, **updates) -> None:
     queue = _CURRENT_QUEUE.get()
     task_id = _CURRENT_TASK_ID.get()

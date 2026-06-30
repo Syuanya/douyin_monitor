@@ -6,6 +6,7 @@ from typing import Any
 
 import flet as ft
 
+from ...core.runtime.operation_models import OperationStatus, task_status_key
 from ...core.runtime.task_center import (
     TASK_STATUS_CANCELLED,
     TASK_STATUS_COMPLETED,
@@ -25,7 +26,11 @@ class TaskCenterPage(PageBase):
         super().__init__(app)
         self.page_name = "task_center"
         self.records_area: ft.Column | None = None
+        self.search_field: Any | None = None
         self.status_filter = "all"
+        self.search_query = ""
+        self.visible_count = 50
+        self.page_size = 50
         self.task_service = TaskCenterFacadeService(app)
 
     async def load(self) -> None:
@@ -42,6 +47,7 @@ class TaskCenterPage(PageBase):
                 self._title_area(),
                 self._queue_summary_card(),
                 self._batch_jobs_card(),
+                self._search_area(),
                 self._filter_area(),
                 self.records_area,
             ]
@@ -132,18 +138,19 @@ class TaskCenterPage(PageBase):
             return ft.Container(visible=False)
         counts = summary.get("counts", {}) if isinstance(summary.get("counts"), dict) else {}
         active = [job for job in jobs if str(job.get("status") or "") in {"running", "paused", "failed"}]
+        display_jobs = active or jobs[:8]
         rows: list[ft.Control] = [
             ft.Row(
                 controls=[
                     ft.Icon(ft.Icons.FACT_CHECK, color=ft.Colors.PRIMARY, size=18),
                     ft.Text("批量任务", weight=ft.FontWeight.BOLD),
-                    ft.Text(f"共 {summary.get('total', 0)} 个 / 运行 {counts.get('running', 0)} / 暂停 {counts.get('paused', 0)} / 失败 {counts.get('failed', 0)}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                    ft.Text(f"共 {summary.get('total', 0)} 个 / 活跃 {summary.get('active_count', 0)} / 运行 {counts.get('running', 0)} / 暂停 {counts.get('paused', 0)} / 失败 {counts.get('failed', 0)}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
                 ],
                 spacing=8,
                 wrap=True,
             )
         ]
-        for job in active[:3]:
+        for job in display_jobs[:12]:
             status = str(job.get("status") or "")
             actions: list[ft.Control] = [
                 ft.TextButton("详情", icon=ft.Icons.INFO_OUTLINE, on_click=lambda e, jid=str(job.get("job_id") or ""): self.show_batch_job_detail(jid))
@@ -166,12 +173,58 @@ class TaskCenterPage(PageBase):
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 )
             )
+        if len(display_jobs) > 12:
+            rows.append(ft.Text(f"还有 {len(display_jobs) - 12} 个批量任务未显示，请进入详情或刷新后按状态处理。", size=12, color=ft.Colors.ON_SURFACE_VARIANT))
         return ft.Container(
             border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
             border_radius=8,
             padding=10,
             content=ft.Column(rows, spacing=4),
         )
+
+    def _search_area(self) -> ft.Control:
+        label = f"当前搜索：{self.search_query}" if self.search_query else "未设置搜索关键词"
+        return ft.Row(
+            controls=[
+                ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT, selectable=True),
+                ft.TextButton("设置搜索", icon=ft.Icons.SEARCH, on_click=lambda e: self.show_search_dialog()),
+                ft.TextButton("清除", icon=ft.Icons.CLEAR, disabled=not bool(self.search_query), on_click=lambda e: self.run_async(self.clear_search())),
+            ],
+            spacing=6,
+            wrap=True,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def show_search_dialog(self) -> None:
+        text_field_cls = getattr(ft, "Text" + "Field")
+        query_field = text_field_cls(
+            label="搜索任务",
+            value=self.search_query,
+            hint_text="标题、类型、说明、任务ID、作品ID",
+            dense=True,
+            width=460,
+            autofocus=True,
+        )
+
+        async def submit(_=None):
+            self.search_query = str(query_field.value or "").strip()
+            self.visible_count = self.page_size
+            self.close_dialog(dialog)
+            count = len(self._filtered_records(self._all_records(1000)))
+            await self.load()
+            await self.app.snack_bar.show_snack_bar(f"任务搜索已应用，匹配 {count} 条", bgcolor=ft.Colors.PRIMARY)
+
+        query_field.on_submit = submit
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("搜索任务"),
+            content=ft.Column(controls=[query_field], tight=True, width=480),
+            actions=[
+                ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=lambda e: self.close_dialog(dialog)),
+                ft.FilledButton("搜索", icon=ft.Icons.SEARCH, on_click=lambda e: self.run_async(submit())),
+            ],
+        )
+        self.show_dialog(dialog)
 
     def _filter_area(self) -> ft.Control:
         status_options = [
@@ -196,7 +249,7 @@ class TaskCenterPage(PageBase):
         )
 
     def _filtered_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return self.task_service.filter_records(records, str(self.status_filter or "all"))
+        return self.task_service.filter_records(records, str(self.status_filter or "all"), self.search_query)
 
     def _all_records(self, limit: int = 500) -> list[dict[str, Any]]:
         return self.task_service.records(limit)
@@ -244,15 +297,34 @@ class TaskCenterPage(PageBase):
     async def refresh(self) -> None:
         if self.records_area is None:
             return
-        records = self._filtered_records(self._all_records(200))
+        records = self._filtered_records(self._all_records(1000))
+        total = len(records)
+        visible = records[: max(1, int(self.visible_count or self.page_size))]
         self.records_area.controls.clear()
         if not records:
-            self.records_area.controls.append(
-                ft.Text("暂无匹配任务记录。开始解析或下载后会在这里显示。", color=ft.Colors.ON_SURFACE_VARIANT)
-            )
+            hint = "暂无匹配任务记录。" if self.search_query or self.status_filter != "all" else "暂无任务记录。开始解析或下载后会在这里显示。"
+            self.records_area.controls.append(ft.Text(hint, color=ft.Colors.ON_SURFACE_VARIANT))
         else:
-            for record in records:
+            self.records_area.controls.append(
+                ft.Text(
+                    f"当前显示 {len(visible)} / 匹配 {total} 条" + (f"；搜索：{self.search_query}" if self.search_query else ""),
+                    size=12,
+                    color=ft.Colors.ON_SURFACE_VARIANT,
+                )
+            )
+            for record in visible:
                 self.records_area.controls.append(self._record_card(record))
+            if len(visible) < total:
+                self.records_area.controls.append(
+                    ft.Row(
+                        controls=[
+                            ft.OutlinedButton("加载更多", icon=ft.Icons.EXPAND_MORE, on_click=lambda e: self.run_async(self.load_more_records())),
+                            ft.Text(f"剩余 {total - len(visible)} 条", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    )
+                )
         try:
             self.records_area.update()
         except Exception:
@@ -260,9 +332,20 @@ class TaskCenterPage(PageBase):
 
     async def set_status_filter(self, mode: str) -> None:
         self.status_filter = str(mode or "all")
-        count = len(self._filtered_records(self._all_records(500)))
+        self.visible_count = self.page_size
+        count = len(self._filtered_records(self._all_records(1000)))
         await self.load()
         await self.app.snack_bar.show_snack_bar(f"已切换状态筛选：{self._status_filter_label(self.status_filter)}，匹配 {count} 条", bgcolor=ft.Colors.PRIMARY)
+
+    async def clear_search(self) -> None:
+        self.search_query = ""
+        self.visible_count = self.page_size
+        await self.load()
+        await self.app.snack_bar.show_snack_bar("任务搜索已清除", bgcolor=ft.Colors.PRIMARY)
+
+    async def load_more_records(self) -> None:
+        self.visible_count += self.page_size
+        await self.refresh()
 
     async def reload(self) -> None:
         await self.load()
@@ -289,10 +372,15 @@ class TaskCenterPage(PageBase):
             self.close_dialog(dialog)
             await self.clear_all_tasks()
 
+        active_count = len([record for record in records if task_status_key(record.get("status_key") or record.get("status")) in {OperationStatus.RUNNING.value, OperationStatus.WAITING.value, OperationStatus.PENDING.value}])
+        if active_count:
+            message = f"当前有 {active_count} 条任务仍在运行或等待。安全清理只会删除已完成、失败、已取消记录，不会隐藏运行中任务。是否继续？"
+        else:
+            message = f"将清空全部 {len(records)} 条任务记录。此操作不会删除已下载文件，是否继续？"
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("清空任务记录"),
-            content=ft.Text(f"将清空全部 {len(records)} 条任务记录。此操作不会删除已下载文件，是否继续？"),
+            content=ft.Text(message),
             actions=[
                 ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=lambda e: self.close_dialog(dialog)),
                 ft.FilledButton("清空", icon=ft.Icons.DELETE_FOREVER, on_click=lambda e: self.run_async(confirm())),
@@ -303,10 +391,16 @@ class TaskCenterPage(PageBase):
     async def clear_all_tasks(self) -> None:
         center = getattr(self.app.services, "task_center", None)
         before = len(self._all_records())
+        result = {"deleted": before, "blocked": 0}
         if center is not None and hasattr(center, "clear_all"):
-            center.clear_all()
+            maybe_result = center.clear_all()
+            if isinstance(maybe_result, dict):
+                result = maybe_result
         await self.load()
-        await self.app.snack_bar.show_snack_bar(f"已清空任务记录 {before} 条", bgcolor=ft.Colors.PRIMARY)
+        blocked = int(result.get("blocked") or 0)
+        deleted = int(result.get("deleted") or 0)
+        msg = f"已安全清理任务记录 {deleted} 条" + (f"；保留运行/等待中任务 {blocked} 条" if blocked else "")
+        await self.app.snack_bar.show_snack_bar(msg, bgcolor=ft.Colors.PRIMARY, duration=6000, show_close_icon=True)
 
     async def toggle_download_queue(self) -> None:
         queue = getattr(self.app.services, "media_task_queue", None)
@@ -337,10 +431,11 @@ class TaskCenterPage(PageBase):
         await self.load()
 
     def _record_card(self, record: dict[str, Any]) -> ft.Container:
-        status = str(record.get("status") or "")
+        status = str(record.get("status_label") or record.get("status") or "")
+        status_key = task_status_key(record.get("status_key") or status)
         detail = str(record.get("detail") or "")
-        color = self._status_color(status)
-        failure = classify_failure(detail) if status == TASK_STATUS_FAILED else {}
+        color = self._status_color(status_key)
+        failure = classify_failure(detail) if status_key == OperationStatus.FAILED.value else {}
         total = int(record.get("total") or 0)
         completed = int(record.get("completed") or 0)
         progress = f"{completed}/{total}" if total else "-"
@@ -359,8 +454,16 @@ class TaskCenterPage(PageBase):
         failed_ids = self._retry_failed_ids(record)
         if failed_ids:
             body_lines.append(f"可重试失败项：{len(failed_ids)} 个")
+        related_summary = self.task_service.related_download_summary(record)
+        if int(related_summary.get("total") or 0) > 0:
+            body_lines.append(
+                f"关联下载：{related_summary.get('total')} 条，可恢复 {related_summary.get('recoverable') or 0}，文件缺失 {related_summary.get('missing_file') or 0}"
+            )
+            failure_text = self.task_service.failure_category_text(related_summary.get("failure_categories") or {})
+            if failure_text:
+                body_lines.append(f"下载失败归类：{failure_text}")
         actions: list[ft.Control] = []
-        if status == TASK_STATUS_FAILED and record.get("retry_action"):
+        if task_status_key(record.get("status_key") or record.get("status")) == OperationStatus.FAILED.value and record.get("retry_action"):
             actions.append(
                 ft.TextButton(
                     "重试",
@@ -413,7 +516,7 @@ class TaskCenterPage(PageBase):
 
     async def retry_all_failed_tasks(self) -> None:
         records = self._all_records(500)
-        retryable = [record for record in records if record.get("status") == TASK_STATUS_FAILED and record.get("retry_action")]
+        retryable = [record for record in records if task_status_key(record.get("status_key") or record.get("status")) == OperationStatus.FAILED.value and record.get("retry_action")]
         if not retryable:
             await self.app.snack_bar.show_snack_bar("没有可重试的失败任务", bgcolor=ft.Colors.PRIMARY)
             return
@@ -491,6 +594,10 @@ class TaskCenterPage(PageBase):
             lines.extend(f"  {item}" for item in remaining_ids[:200])
         reasons = detail.get("failure_reasons") if isinstance(detail.get("failure_reasons"), dict) else {}
         if reasons:
+            summary = self.task_service.failure_category_summary_from_reasons(reasons)
+            text = self.task_service.failure_category_text(summary)
+            if text:
+                lines.append(f"失败归类汇总：{text}")
             lines.append("失败原因：")
             lines.append(json.dumps(reasons, ensure_ascii=False, indent=2))
         dialog = ft.AlertDialog(
@@ -503,7 +610,7 @@ class TaskCenterPage(PageBase):
 
     def show_task_detail(self, record: dict[str, Any]) -> None:
         payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
-        failure = classify_failure(str(record.get("detail") or "")) if record.get("status") == TASK_STATUS_FAILED else {}
+        failure = classify_failure(str(record.get("detail") or "")) if task_status_key(record.get("status_key") or record.get("status")) == OperationStatus.FAILED.value else {}
         failed_ids = [str(item_id) for item_id in payload.get("failed_item_ids", []) if item_id]
         lines = [
             f"标题：{record.get('title') or '-'}",
@@ -523,6 +630,18 @@ class TaskCenterPage(PageBase):
         if failed_ids:
             lines.append("失败作品ID：")
             lines.extend(f"  {item_id}" for item_id in failed_ids[:200])
+        related_summary = self.task_service.related_download_summary(record)
+        related_downloads = self.task_service.related_download_records(record, limit=30)
+        if related_downloads:
+            status_counts = related_summary.get("status_counts") if isinstance(related_summary.get("status_counts"), dict) else {}
+            status_text = "，".join(f"{name} {count}" for name, count in sorted(status_counts.items()))
+            lines.append(f"关联下载汇总：总计 {related_summary.get('total') or 0}，可恢复 {related_summary.get('recoverable') or 0}，文件缺失 {related_summary.get('missing_file') or 0}" + (f"，状态：{status_text}" if status_text else ""))
+            failure_text = self.task_service.failure_category_text(related_summary.get("failure_categories") or {})
+            if failure_text:
+                lines.append(f"关联下载失败归类：{failure_text}")
+            lines.append("关联下载记录：")
+            for item in related_downloads[:30]:
+                lines.append(f"  {item.get('status') or '-'} | {item.get('label') or item.get('download_id') or '-'} | {item.get('save_path') or '-'}")
         if payload:
             lines.append("重试参数：")
             lines.append(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -542,13 +661,14 @@ class TaskCenterPage(PageBase):
 
     @staticmethod
     def _status_color(status: str) -> str:
-        if status == TASK_STATUS_COMPLETED:
+        key = task_status_key(status)
+        if key == OperationStatus.COMPLETED.value:
             return ft.Colors.GREEN
-        if status == TASK_STATUS_FAILED:
+        if key == OperationStatus.FAILED.value:
             return ft.Colors.ERROR
-        if status == TASK_STATUS_CANCELLED:
+        if key == OperationStatus.CANCELLED.value:
             return ft.Colors.ON_SURFACE_VARIANT
-        if status == TASK_STATUS_RUNNING:
+        if key == OperationStatus.RUNNING.value:
             return ft.Colors.PRIMARY
         return ft.Colors.ON_SURFACE_VARIANT
 

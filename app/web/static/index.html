@@ -174,8 +174,11 @@
 
     <section id="history" class="tab">
       <div class="panel toolbar">
-        <select id="historyStatus"><option value="all">全部</option><option value="running">运行中</option><option value="completed">完成</option><option value="failed">失败</option><option value="cancelled">已取消</option><option value="recoverable">可恢复</option></select>
+        <select id="historyStatus"><option value="all">全部</option><option value="running">运行中</option><option value="pending">等待中</option><option value="completed">完成</option><option value="failed">失败</option><option value="cancelled">已取消</option><option value="recoverable">可恢复</option><option value="missing_file">文件缺失</option></select>
+        <input id="historyQuery" placeholder="搜索标题 / 路径 / URL / 失败原因" />
         <button id="refreshHistoryBtn">刷新历史</button>
+        <button id="recoverHistoryBtn">恢复全部</button>
+        <button id="exportHistoryBtn">导出当前筛选</button>
       </div>
       <div id="historyStats" class="grid small"></div>
       <div id="historyList" class="list"></div>

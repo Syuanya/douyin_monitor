@@ -1,0 +1,21 @@
+TokenManager:
+  tiktok:
+    headers:
+      User-Agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      Referer: 'https://www.tiktok.com/'
+      Cookie: ''
+    msToken:
+      url: ''
+      magic: 538969122
+      version: 1
+      dataType: 8
+      strData: ''
+      User-Agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    ttwid:
+      url: ''
+      data: '{}'
+    odin_tt:
+      url: ''
+    proxies:
+      http: null
+      https: null
