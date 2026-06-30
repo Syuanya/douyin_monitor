@@ -19,6 +19,7 @@ class BatchImportControls:
 
 
 def build_work_bulk_action_rows(view, account: Any, has_selected: bool) -> list[ft.Control]:
+    failed_count = len([item for item in getattr(account, "items", []) or [] if str(getattr(item, "status", "") or "") == "download_failed"]) if account is not None else 0
     return [
         ft.Row(
             controls=[
@@ -26,7 +27,7 @@ def build_work_bulk_action_rows(view, account: Any, has_selected: bool) -> list[
                 ft.IconButton(
                     icon=ft.Icons.REPLAY,
                     tooltip="重试失败下载",
-                    disabled=view.download_in_progress,
+                    disabled=view.download_in_progress or failed_count <= 0,
                     on_click=lambda e: view.run_async(view.download_all(view.selected_account_id or "", filter_mode="failed")),
                     icon_color=ft.Colors.PRIMARY,
                 ),

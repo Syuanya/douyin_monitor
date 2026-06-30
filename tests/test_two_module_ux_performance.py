@@ -9,7 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_content_monitor_account_list_is_incrementally_rendered() -> None:
     text = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
 
-    assert "self.account_visible_count = 30" in text
+    state = (ROOT / "app/ui/views/douyin_content_state.py").read_text(encoding="utf-8")
+    assert "DEFAULT_ACCOUNT_PAGE_SIZE = 30" in state
+    assert "self.account_visible_count = content_state.DEFAULT_ACCOUNT_PAGE_SIZE" in text
     assert "load_more_accounts" in text
     assert "当前显示 {len(visible_accounts)}/{len(accounts)} 个账号" in text
     assert "大量账号会分批渲染" in text

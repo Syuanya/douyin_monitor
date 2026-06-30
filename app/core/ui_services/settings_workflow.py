@@ -103,9 +103,9 @@ class SettingsWorkflow:
                 "enable_proxy": bool(values.get("enable_proxy")),
                 "proxy_address": str(values.get("proxy_address") or "").strip(),
 
-                "monitor_batch_concurrency": self.bounded_int(values.get("monitor_batch_concurrency"), 2, 1, 16),
+                "monitor_batch_concurrency": self.bounded_int(values.get("monitor_batch_concurrency"), 2, 1, 8),
                 "batch_parse_size": self.bounded_int(values.get("batch_parse_size"), 20, 1, 500),
-                "batch_download_concurrency": self.bounded_int(values.get("batch_download_concurrency"), 3, 1, 32),
+                "batch_download_concurrency": self.bounded_int(values.get("batch_download_concurrency"), 3, 1, 12),
                 "download_chunk_size_kb": self.bounded_int(values.get("download_chunk_size_kb"), 512, 64, 8192),
                 "gallery_image_concurrency": self.bounded_int(values.get("gallery_image_concurrency"), 4, 1, 32),
                 "douyin_cookie_cooldown_seconds": self.bounded_int(values.get("douyin_cookie_cooldown_seconds"), 600, 60, 3600),

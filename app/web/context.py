@@ -12,6 +12,7 @@ from typing import Any
 
 from app.core.application.service_container import DouyinMonitorServices
 from app.core.content_monitor.services.batch_import_service import parse_batch_import_text
+from app.core.content_monitor.status_rules import is_pending_new_work_item
 from app.core.ui_services.home_dashboard_service import HomeDashboardService
 from app.core.ui_services.performance_observability_service import PerformanceObservabilityService
 from app.core.ui_services.download_history_service import DownloadHistoryService
@@ -92,8 +93,7 @@ class WebRuntime:
             account_data = account_to_dict(account, include_items=False)
             account_name = account_data.get("display_name") or account_data.get("douyin_nickname") or "抖音用户"
             for item in list(getattr(account, "items", []) or []):
-                status = str(getattr(item, "status", "") or "")
-                if status not in {"new", "count_only"}:
+                if not is_pending_new_work_item(item):
                     continue
                 row = item_to_dict(item)
                 row["account_id"] = account.account_id
@@ -176,6 +176,22 @@ class WebRuntime:
             return {"success": False, "reason": "暂无下载记录可导出", "total": 0}
         path = self.download_history.export_csv(records)
         return {"success": True, "path": path, "total": len(records), "status": status, "query": query}
+
+
+    def content_monitor_materials(self, *, query: str = "", status: str = "pending", media_type: str = "all", group_name: str = "", limit: int = 200) -> dict[str, Any]:
+        return self.monitor.content_monitor_material_collection(query=query, status=status, media_type=media_type, group_name=group_name, limit=limit)
+
+    def content_monitor_health(self) -> dict[str, Any]:
+        return self.monitor.content_monitor_health_summary()
+
+    def content_monitor_groups(self) -> dict[str, Any]:
+        return self.monitor.content_monitor_group_statistics()
+
+    def content_monitor_digest(self, *, days: int = 1) -> dict[str, Any]:
+        return self.monitor.content_monitor_time_window_digest(days=days)
+
+    def export_content_monitor_materials(self, *, query: str = "", status: str = "pending", media_type: str = "all", group_name: str = "", limit: int = 1000) -> dict[str, Any]:
+        return self.monitor.export_content_monitor_material_links(query=query, status=status, media_type=media_type, group_name=group_name, limit=limit)
 
     def batch_import_preview(self, text: str, default_group: str = "", source: str = "web") -> dict[str, Any]:
         preview = parse_batch_import_text(
@@ -943,7 +959,7 @@ class WebRuntime:
                 queued.append(enriched)
         return {"summary": summary, "snapshot": snapshot, "running": running[:20], "queued": queued[:80], "total_speed_bps": round(total_speed, 2)}
 
-    def cancel_task_record(self, task_id: str) -> dict[str, Any]:
+    async def cancel_task_record(self, task_id: str) -> dict[str, Any]:
         center = getattr(self.services, "task_center", None)
         if center is None or not hasattr(center, "snapshot"):
             return {"success": False, "reason": "任务中心不可用"}
@@ -951,6 +967,8 @@ class WebRuntime:
         if not record:
             return {"success": False, "reason": "任务不存在"}
         status = str(record.get("status") or "")
+        if record.get("cancel_action"):
+            return await self.task_center.cancel_record(record)
         if status in {"运行中", "等待中", "running", "pending"}:
             return {"success": False, "reason": "该任务仍在运行或等待，不能只取消记录；请使用下载队列取消，避免界面状态和真实执行状态不一致。"}
         if not hasattr(center, "cancel"):

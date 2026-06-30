@@ -1,32 +1,36 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import inspect
-import os
-import re
 import time
-from datetime import datetime
 from typing import Any
 
 import flet as ft
 
-from ...core.diagnostics.diagnostic_tools import export_diagnostic_bundle
 from ...core.content_monitor.models import DouyinMonitorAccount
-from ...core.content_monitor.services.batch_import_service import (
-    BatchImportPreview,
-    parse_batch_import_text,
-    preview_to_report_lines,
-    read_batch_import_file,
-)
 from ...utils.logger import logger
 from ..base_page import PageBase
 from ..components.business import douyin_content_cards as content_cards
-from ..components.business.image_preview_dialog import ImagePreviewDialog
-from ..components.business.video_player import VideoPlayer
 from ..components.common.safe_icons import icon
-from .douyin_content_bulk_components import BatchImportControls, build_batch_import_dialog, build_work_bulk_action_rows
+from . import douyin_content_state as content_state
+from .douyin_content_bulk_components import build_work_bulk_action_rows
+from .douyin_content_account_batch_controller import DouyinContentAccountBatchController
+from .douyin_content_account_controller import DouyinContentAccountController
+from .douyin_content_add_account_controller import DouyinContentAddAccountController
+from .douyin_content_batch_settings_controller import DouyinContentBatchSettingsController
+from .douyin_content_batch_import_controller import DouyinContentBatchImportController
+from .douyin_content_download_controller import DouyinContentDownloadController
+from .douyin_content_download_complete_controller import DouyinContentDownloadCompleteController
+from .douyin_content_global_actions_controller import DouyinContentGlobalActionsController
+from .douyin_content_insights_controller import DouyinContentInsightsController
+from .douyin_content_export_controller import DouyinContentExportController
+from .douyin_content_error_repair_controller import DouyinContentErrorRepairController
+from .douyin_content_inbox_controller import DouyinContentInboxController
+from .douyin_content_preview_controller import DouyinContentPreviewController
+from .douyin_content_refresh_coordinator import DouyinContentRefreshCoordinator
 from .douyin_content_presenter import account_next_step, account_status_meta, auto_download_policy_label
+from .douyin_content_toolbar import build_title_area
+from .douyin_content_work_controller import DouyinContentWorkController
 
 
 class DouyinContentMonitorPage(PageBase):
@@ -47,8 +51,8 @@ class DouyinContentMonitorPage(PageBase):
         self.account_search_query = ""
         self.account_filter = "all"
         self.account_group_filter = "all"
-        self.account_visible_count = 30
-        self.account_page_size = 30
+        self.account_visible_count = content_state.DEFAULT_ACCOUNT_PAGE_SIZE
+        self.account_page_size = content_state.DEFAULT_ACCOUNT_PAGE_SIZE
         self._pending_monitor_refresh = False
         self._last_pubsub_refresh_at = 0.0
         self.return_account_anchor_id: str | None = None
@@ -57,11 +61,26 @@ class DouyinContentMonitorPage(PageBase):
         self.work_select_mode = False
         self.selected_work_ids: set[str] = set()
         self.work_filter = "all"
-        self.visible_work_count = 12
-        self.work_page_size = 12
-        self.inbox_visible_count = 12
+        self.visible_work_count = content_state.DEFAULT_WORK_PAGE_SIZE
+        self.work_page_size = content_state.DEFAULT_WORK_PAGE_SIZE
+        self.inbox_visible_count = content_state.DEFAULT_WORK_PAGE_SIZE
         self.download_in_progress = False
         self.download_stop_requested = False
+        self.download_controller = DouyinContentDownloadController(self)
+        self.download_complete_controller = DouyinContentDownloadCompleteController(self)
+        self.add_account_controller = DouyinContentAddAccountController(self)
+        self.account_controller = DouyinContentAccountController(self)
+        self.account_batch_controller = DouyinContentAccountBatchController(self)
+        self.batch_settings_controller = DouyinContentBatchSettingsController(self)
+        self.batch_import_controller = DouyinContentBatchImportController(self)
+        self.global_actions_controller = DouyinContentGlobalActionsController(self)
+        self.insights_controller = DouyinContentInsightsController(self)
+        self.export_controller = DouyinContentExportController(self)
+        self.work_controller = DouyinContentWorkController(self)
+        self.inbox_controller = DouyinContentInboxController(self)
+        self.error_repair_controller = DouyinContentErrorRepairController(self)
+        self.preview_controller = DouyinContentPreviewController(self)
+        self.refresh_coordinator = DouyinContentRefreshCoordinator(self)
         self.download_progress_text = ""
         self.download_failure_reasons: list[str] = []
         self.batch_result_lines: list[str] = []
@@ -78,10 +97,8 @@ class DouyinContentMonitorPage(PageBase):
         self.batch_progress_bar_control: ft.Text | None = None
         self.batch_toolbar_buttons: dict[str, ft.Control] = {}
         self.account_checkbox_controls: dict[str, ft.Checkbox] = {}
-        self.batch_import_picker: ft.FilePicker | None = None
         self.batch_job_running = False
         self.batch_cancel_requested = False
-        self.image_preview = ImagePreviewDialog(app, "作品图集")
         self.recent_deleted_accounts: list[dict[str, Any]] = []
         self.deleted_account_batches: list[list[dict[str, Any]]] = []
         self._subscribed = False
@@ -180,144 +197,7 @@ class DouyinContentMonitorPage(PageBase):
         self.safe_content_update()
 
     def create_title_area(self):
-        batch_controls = []
-        if not self.account_select_mode:
-            batch_controls.append(
-                ft.TextButton(
-                    "批量处理",
-                    icon=ft.Icons.CHECKLIST,
-                    on_click=lambda e: self.run_async(self.toggle_account_select_mode()),
-                )
-            )
-        return ft.Column(
-            controls=[
-                ft.Row(
-                    controls=[
-                        ft.Text(self._.get("title", "抖音内容监控"), theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
-                        ft.IconButton(
-                            icon=ft.Icons.INFO_OUTLINE,
-                            tooltip=self._.get("subtitle", "低频检测公开主页作品更新"),
-                            icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                        ),
-                        *batch_controls,
-                        ft.Container(expand=True),
-                        self.loading_indicator,
-                        ft.IconButton(
-                            icon=ft.Icons.STOP_CIRCLE,
-                            tooltip="处理完当前请求后停止批量检测/同步",
-                            disabled=not self.batch_job_running,
-                            on_click=lambda e: self.run_async(self.cancel_batch_job()),
-                            icon_color=ft.Colors.ERROR,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.SEARCH,
-                            tooltip="搜索监控用户",
-                            on_click=lambda e: self.run_async(self.search_accounts_on_click()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.TextButton(
-                            f"新作品箱 {self._pending_new_work_count()}",
-                            icon=ft.Icons.INBOX,
-                            tooltip=f"打开新作品箱（当前 {self._pending_new_work_count()} 个）",
-                            on_click=lambda e: self.run_async(self.open_new_work_inbox()),
-                        ),
-                        ft.TextButton(
-                            f"异常修复 {len(self._error_accounts())}",
-                            icon=ft.Icons.HEALTH_AND_SAFETY,
-                            tooltip="集中查看 Cookie、风控、主页不可访问等异常账号",
-                            disabled=not self._error_accounts(),
-                            on_click=lambda e: self.run_async(self.open_error_repair_center()),
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.ADD,
-                            tooltip="添加监控用户",
-                            on_click=lambda e: self.run_async(self.show_add_account_dialog()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.CHECKLIST,
-                            tooltip="批量导入账号（支持 TXT / CSV 文件）",
-                            on_click=lambda e: self.run_async(self.show_batch_import_dialog()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.REFRESH,
-                            tooltip="刷新界面（不请求抖音；需要请求平台请点快速检测或同步作品列表）",
-                            on_click=self.refresh_on_click,
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.BUG_REPORT_OUTLINED,
-                            tooltip=self._.get("export_diagnostics", "导出诊断包"),
-                            on_click=self.export_diagnostics_on_click,
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.FOLDER_OPEN,
-                            tooltip=self._.get("open_log_dir", "打开日志目录"),
-                            on_click=self.open_log_dir_on_click,
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.RESTORE,
-                            tooltip="恢复最近删除的账号",
-                            visible=bool(self.recent_deleted_accounts or self.deleted_account_batches),
-                            on_click=lambda e: self.run_async(self.restore_recent_deleted_accounts()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.START,
-                ),
-                ft.Row(
-                    controls=[
-                        self._monitor_summary_chip(),
-                        *self._account_filter_buttons(),
-                        ft.TextButton(
-                            "快速检测更新",
-                            icon=ft.Icons.REFRESH,
-                            tooltip="低成本检查账号是否有新作品；不会完整拉取作品明细",
-                            on_click=lambda e: self.run_async(self.check_all_enabled_on_click()),
-                        ),
-                        ft.TextButton(
-                            "同步作品列表",
-                            icon=ft.Icons.CLOUD_SYNC,
-                            tooltip="请求作品明细、封面和下载信息；账号多时建议低频使用",
-                            on_click=lambda e: self.run_async(self.sync_all_accounts_on_click()),
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.DOWNLOAD,
-                            tooltip="导出作品明细CSV",
-                            on_click=lambda e: self.run_async(self.export_monitor_csv()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.GROUP,
-                            tooltip="导出监控用户CSV",
-                            on_click=lambda e: self.run_async(self.export_monitor_accounts_csv()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.FOLDER_OPEN,
-                            tooltip="打开导出目录",
-                            on_click=lambda e: self.run_async(self.open_monitor_export_dir()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.LIST_ALT,
-                            tooltip="查看最近批量结果",
-                            on_click=lambda e: self.run_async(self.show_batch_result_dialog()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                    ],
-                    spacing=8,
-                    wrap=True,
-                ),
-                self._account_group_filter_area(),
-                *([self._batch_account_toolbar()] if self.account_select_mode else ([self._batch_progress_panel()] if (self.batch_job_running or self.batch_progress_text) else [])),
-            ],
-            spacing=6,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        )
+        return build_title_area(self)
 
     def _monitor_summary_chip(self) -> ft.Container:
         accounts = list(self.manager.accounts)
@@ -338,23 +218,23 @@ class DouyinContentMonitorPage(PageBase):
 
     def _pending_new_work_count(self, accounts: list[DouyinMonitorAccount] | None = None) -> int:
         target_accounts = accounts if accounts is not None else list(self.manager.accounts)
-        return sum(1 for account in target_accounts for item in getattr(account, "items", []) if self._is_pending_new_work_item(item))
+        return content_state.pending_new_work_count(target_accounts)
 
-    def _pending_new_work_count_for_account(self, account: DouyinMonitorAccount) -> int:
-        return sum(1 for item in getattr(account, "items", []) if self._is_pending_new_work_item(item))
+    @staticmethod
+    def _pending_new_work_count_for_account(account: DouyinMonitorAccount) -> int:
+        return content_state.pending_new_work_count_for_account(account)
 
     @staticmethod
     def _is_pending_new_work_item(item: Any) -> bool:
-        return str(getattr(item, "status", "") or "") in {"new", "count_only"}
+        return content_state.is_pending_new_work_item(item)
 
     @staticmethod
     def _is_count_only_item(item: Any) -> bool:
-        return str(getattr(item, "status", "") or "") == "count_only"
+        return content_state.is_count_only_item(item)
 
-    def _sync_account_last_new_count(self, account: DouyinMonitorAccount) -> int:
-        count = self._pending_new_work_count_for_account(account)
-        account.last_new_count = count
-        return count
+    @staticmethod
+    def _sync_account_last_new_count(account: DouyinMonitorAccount) -> int:
+        return content_state.sync_account_last_new_count(account)
 
     def _account_filter_buttons(self) -> list[ft.Control]:
         new_count = self._pending_new_work_count()
@@ -500,14 +380,7 @@ class DouyinContentMonitorPage(PageBase):
         )
 
     def _account_batch_parallel_limit(self) -> int:
-        settings = getattr(self.app.services, "settings_config", None)
-        config = getattr(settings, "user_config", {}) if settings is not None else {}
-        raw = config.get("monitor_batch_concurrency", config.get("douyin_content_monitor_batch_concurrency", 2))
-        try:
-            value = int(raw or 2)
-        except (TypeError, ValueError):
-            value = 2
-        return max(1, min(4, value))
+        return self.account_batch_controller.parallel_limit()
 
     def _batch_account_toolbar(self) -> ft.Container:
         visible_accounts = self._visible_accounts()
@@ -643,6 +516,42 @@ class DouyinContentMonitorPage(PageBase):
     def account_next_step(account: DouyinMonitorAccount) -> str:
         return account_next_step(account)
 
+    def account_next_check_time(self, account: DouyinMonitorAccount) -> str:
+        resolver = getattr(self.manager, "account_next_check_time", None)
+        if callable(resolver):
+            return str(resolver(account) or "-")
+        return "-"
+
+    def _work_summary_panel(self, account: DouyinMonitorAccount | None) -> ft.Control:
+        items = list(getattr(account, "items", []) or []) if account is not None else []
+        counts = content_state.download_status_counts(items)
+        filtered_total = len(self._filter_work_items(items, self.work_filter)) if items else 0
+        visible, _next_visible = content_state.display_window(filtered_total, self.visible_work_count, self.work_page_size)
+        controls: list[ft.Control] = [
+            ft.Icon(ft.Icons.INSIGHTS, size=16, color=ft.Colors.PRIMARY),
+            ft.Text(f"当前筛选已显示 {visible}/{filtered_total}", size=12, weight=ft.FontWeight.BOLD),
+            ft.Text(f"全部 {counts['total']}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"新作品 {counts['new']}", size=12, color=ft.Colors.PRIMARY if counts['new'] else ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"已下载 {counts['downloaded']}", size=12, color=ft.Colors.GREEN if counts['downloaded'] else ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"失败 {counts['failed']}", size=12, color=ft.Colors.ERROR if counts['failed'] else ft.Colors.ON_SURFACE_VARIANT),
+            ft.Text(f"图集 {counts['gallery']} / 视频 {counts['video']}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+        ]
+        if account is not None and counts["failed"]:
+            controls.append(
+                ft.TextButton(
+                    "重试失败",
+                    icon=ft.Icons.REPLAY,
+                    disabled=self.download_in_progress,
+                    on_click=lambda e, account_id=account.account_id: self.run_async(self.download_all(account_id, filter_mode="failed")),
+                )
+            )
+        return ft.Container(
+            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            content=ft.Row(controls=controls, spacing=10, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        )
+
     def show_confirm_dialog(self, title: str, message: str, on_confirm) -> None:
         dialog_ref: dict[str, ft.AlertDialog | None] = {"dialog": None}
 
@@ -692,6 +601,7 @@ class DouyinContentMonitorPage(PageBase):
                     spacing=6,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                self._work_summary_panel(account),
                 ft.Container(
                     visible=bool(self.download_progress_text),
                     content=ft.Text(self.download_progress_text, size=12, color=ft.Colors.PRIMARY),
@@ -706,56 +616,7 @@ class DouyinContentMonitorPage(PageBase):
         )
 
     def create_inbox_title_area(self):
-        items = self._new_work_entries()
-        return ft.Column(
-            controls=[
-                ft.Row(
-                    controls=[
-                        ft.IconButton(
-                            icon=ft.Icons.ARROW_BACK,
-                            tooltip="返回账号列表",
-                            on_click=lambda e: self.run_async(self.back_to_accounts()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.Text("新作品收件箱", theme_style=ft.TextThemeStyle.TITLE_MEDIUM, expand=True),
-                        ft.Text(f"{len(items)} 个新作品", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                        self.loading_indicator,
-                        self._batch_result_icon_button(),
-                    ],
-                    spacing=6,
-                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-                self._inbox_summary_panel(items),
-                ft.Row(
-                    controls=[
-                        ft.IconButton(
-                            icon=ft.Icons.CLOUD_SYNC,
-                            tooltip="同步作品列表：请求作品明细、封面和下载信息",
-                            on_click=lambda e: self.run_async(self.sync_all_accounts_on_click()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.DOWNLOAD,
-                            tooltip="下载全部新作品",
-                            disabled=self.download_in_progress or not items,
-                            on_click=lambda e: self.run_async(self.download_new_inbox_items()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.DONE_ALL,
-                            tooltip="标记全部新作品为已处理",
-                            disabled=not items,
-                            on_click=lambda e: self.run_async(self.mark_all_new_items_seen()),
-                            icon_color=ft.Colors.PRIMARY,
-                        ),
-                    ],
-                    spacing=6,
-                    wrap=True,
-                ),
-            ],
-            spacing=6,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-        )
+        return self.inbox_controller.create_title_area()
 
     def _batch_result_icon_button(self) -> ft.IconButton:
         return ft.IconButton(
@@ -915,129 +776,30 @@ class DouyinContentMonitorPage(PageBase):
         return self._.get("empty", "还没有添加抖音主页。")
 
     def _error_accounts(self) -> list[DouyinMonitorAccount]:
-        return [account for account in self.manager.accounts if account.last_error or "异常" in str(account.status)]
+        return self.error_repair_controller.accounts()
 
     def _error_bucket(self, account: DouyinMonitorAccount) -> str:
-        text = f"{getattr(account, 'status', '')} {getattr(account, 'last_error', '')}"
-        return self._batch_failure_category(text)
+        return self.error_repair_controller.bucket(account)
 
     def _error_summary(self) -> dict[str, int]:
-        summary = {"cookie": 0, "risk_control": 0, "profile": 0, "cancelled": 0, "other": 0}
-        for account in self._error_accounts():
-            bucket = self._error_bucket(account)
-            summary[bucket] = summary.get(bucket, 0) + 1
-        return summary
+        return self.error_repair_controller.summary()
 
     def _error_repair_panel(self) -> ft.Control:
-        accounts = self._error_accounts()
-        summary = self._error_summary()
-        label_map = {
-            "cookie": "Cookie/登录态",
-            "risk_control": "风控/限流",
-            "profile": "主页不可访问",
-            "cancelled": "已取消",
-            "other": "其他异常",
-        }
-        chips = [
-            ft.Container(
-                content=ft.Text(f"{label_map.get(key, key)} {count}", size=12),
-                border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                border_radius=14,
-                padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-            )
-            for key, count in summary.items()
-            if count
-        ]
-        if not chips:
-            chips = [ft.Text("当前没有异常账号。", size=12, color=ft.Colors.ON_SURFACE_VARIANT)]
-        return ft.Container(
-            border=ft.Border.all(1, ft.Colors.ERROR_CONTAINER),
-            border_radius=8,
-            padding=10,
-            bgcolor=ft.Colors.ERROR_CONTAINER,
-            content=ft.Column(
-                controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.HEALTH_AND_SAFETY, color=ft.Colors.ERROR),
-                            ft.Text("异常修复中心", weight=ft.FontWeight.BOLD),
-                            ft.Text(f"{len(accounts)} 个账号需要处理", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ],
-                        spacing=8,
-                        wrap=True,
-                    ),
-                    ft.Row(controls=chips, spacing=6, wrap=True),
-                    ft.Text("建议先检查 Cookie 和网络；多账号同时失败时，降低并发后再重试。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Row(
-                        controls=[
-                            ft.TextButton("重新检测异常账号", icon=ft.Icons.REFRESH, disabled=not accounts or self.batch_job_running, on_click=lambda e: self.run_async(self.check_error_accounts_on_click())),
-                            ft.TextButton("同步异常账号", icon=ft.Icons.CLOUD_SYNC, disabled=not accounts or self.batch_job_running, on_click=lambda e: self.run_async(self.sync_error_accounts_on_click())),
-                            ft.TextButton("复制异常摘要", icon=ft.Icons.CONTENT_COPY, disabled=not accounts, on_click=lambda e: self.run_async(self.copy_error_summary())),
-                        ],
-                        spacing=6,
-                        wrap=True,
-                    ),
-                ],
-                spacing=6,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-            ),
-        )
+        return self.error_repair_controller.create_panel()
 
     def _inbox_summary_panel(self, entries: list[tuple[DouyinMonitorAccount, Any]]) -> ft.Control:
-        total = len(entries)
-        downloaded = len([item for _account, item in entries if getattr(item, "status", "") == "downloaded"])
-        failed = len([item for _account, item in entries if getattr(item, "status", "") == "download_failed"])
-        count_only = len([item for _account, item in entries if self._is_count_only_item(item)])
-        pending = max(0, total - downloaded - failed)
-        return ft.Container(
-            border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-            border_radius=8,
-            padding=10,
-            content=ft.Row(
-                controls=[
-                    ft.Icon(ft.Icons.INBOX, color=ft.Colors.PRIMARY),
-                    ft.Text(f"待处理 {pending}", weight=ft.FontWeight.BOLD),
-                    ft.Text(f"已下载 {downloaded}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text(f"失败 {failed}", size=12, color=ft.Colors.ERROR if failed else ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text(f"数量变化提示 {count_only}", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Text("优先处理失败项和数量变化提示；下载后可批量标记已处理。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                ],
-                spacing=10,
-                wrap=True,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-        )
+        return self.inbox_controller.summary_panel(entries)
 
     def _filter_accounts(self, accounts: list[DouyinMonitorAccount]) -> list[DouyinMonitorAccount]:
-        mode = str(self.account_filter or "all")
-        if mode == "enabled":
-            return [account for account in accounts if account.monitor_enabled]
-        if mode == "new":
-            return [account for account in accounts if self._pending_new_work_count_for_account(account) > 0]
-        if mode == "error":
-            return [account for account in accounts if account.last_error or "异常" in str(account.status)]
-        if mode == "stopped":
-            return [account for account in accounts if not account.monitor_enabled]
-        return accounts
+        return content_state.filter_accounts(accounts, self.account_filter)
 
     def _visible_accounts(self) -> list[DouyinMonitorAccount]:
-        accounts = self._filter_accounts(list(self.manager.accounts))
-        group_filter = str(self.account_group_filter or "all")
-        if group_filter == "__ungrouped__":
-            accounts = [account for account in accounts if not str(account.group_name or "").strip()]
-        elif group_filter != "all":
-            accounts = [account for account in accounts if str(account.group_name or "").strip() == group_filter]
-        if self.account_search_query:
-            query = self.account_search_query.lower()
-            accounts = [
-                account
-                for account in accounts
-                if query in (account.display_name or "").lower()
-                or query in (account.douyin_nickname or "").lower()
-                or query in (account.group_name or "").lower()
-                or query in (account.homepage_url or "").lower()
-            ]
-        return accounts
+        return content_state.visible_accounts(
+            list(self.manager.accounts),
+            mode=self.account_filter,
+            group_filter=self.account_group_filter,
+            search_query=self.account_search_query,
+        )
 
     async def refresh_history(self):
         if self.history_area is None:
@@ -1102,68 +864,20 @@ class DouyinContentMonitorPage(PageBase):
             )
 
     def _new_work_entries(self) -> list[tuple[DouyinMonitorAccount, Any]]:
-        entries: list[tuple[DouyinMonitorAccount, Any]] = []
-        for account in self.manager.accounts:
-            for item in getattr(account, "items", []):
-                if self._is_pending_new_work_item(item):
-                    entries.append((account, item))
-        entries.sort(key=lambda entry: getattr(entry[1], "first_seen_time", "") or getattr(entry[1], "publish_time", ""), reverse=True)
-        return entries
+        return content_state.new_work_entries(self.manager.accounts)
 
     async def refresh_new_work_inbox(self):
-        if self.history_area is None:
-            return
-        self.history_area.controls.clear()
-        entries = self._new_work_entries()
-        if not entries:
-            self.history_area.controls.append(
-                ft.Container(
-                    padding=18,
-                    border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
-                    border_radius=8,
-                    content=ft.Column(
-                        controls=[
-                            ft.Text("暂无未处理新作品", weight=ft.FontWeight.BOLD),
-                            ft.Text("同步或检测监控账号后，新增作品和数量变化提示会集中显示在这里。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                        ],
-                        spacing=6,
-                    ),
-                )
-            )
-            return
-        for account, item in entries[: self.inbox_visible_count]:
-            self.history_area.controls.append(self.create_inbox_item(account, item))
-        if self.inbox_visible_count < len(entries):
-            self.history_area.controls.append(
-                ft.OutlinedButton(
-                    f"加载更多（{min(self.inbox_visible_count + self.work_page_size, len(entries))}/{len(entries)}）",
-                    icon=ft.Icons.EXPAND_MORE,
-                    on_click=lambda e: self.run_async(self.load_more_works()),
-                )
-            )
+        await self.inbox_controller.refresh()
 
     def create_inbox_item(self, account: DouyinMonitorAccount, item):
         return content_cards.create_inbox_item(self, account, item)
 
-    def _filter_work_items(self, items: list[Any], mode: str) -> list[Any]:
-        mode = str(mode or "all")
-        base = [item for item in items if getattr(item, "status", "") != "count_only"]
-        if mode == "new":
-            return [item for item in base if getattr(item, "status", "") == "new"]
-        if mode == "pending":
-            return [item for item in base if getattr(item, "status", "") not in {"downloaded", "download_failed"}]
-        if mode == "downloaded":
-            return [item for item in base if getattr(item, "status", "") == "downloaded"]
-        if mode == "failed":
-            return [item for item in base if getattr(item, "status", "") == "download_failed"]
-        if mode == "video":
-            return [item for item in base if not self._is_gallery_item(item)]
-        if mode == "gallery":
-            return [item for item in base if self._is_gallery_item(item)]
-        return base
+    @staticmethod
+    def _filter_work_items(items: list[Any], mode: str) -> list[Any]:
+        return DouyinContentWorkController.filter_items(items, mode)
 
     def create_account_card(self, account: DouyinMonitorAccount):
-        return content_cards.create_account_card(self, account)
+        return self.account_controller.create_card(account)
 
     def create_history_item(self, item):
         return content_cards.create_history_item(self, item)
@@ -1173,12 +887,7 @@ class DouyinContentMonitorPage(PageBase):
 
     @staticmethod
     def _is_gallery_item(item) -> bool:
-        return bool(getattr(item, "image_urls", None)) or str(getattr(item, "media_type", "") or "").lower() in {
-            "image",
-            "images",
-            "gallery",
-            "note",
-        }
+        return content_state.is_gallery_item(item)
 
     async def _await_coro(self, coro):
         try:
@@ -1202,285 +911,25 @@ class DouyinContentMonitorPage(PageBase):
                 pass
 
     async def show_add_account_dialog(self, _e=None):
-        url_field = ft.TextField(
-            label="抖音主页链接",
-            hint_text="https://www.douyin.com/user/...",
-            autofocus=True,
-            dense=True,
-            width=520,
-        )
-        name_field = ft.TextField(label="备注名称", dense=True, width=520)
-
-        async def close_dialog(_=None):
-            dialog.open = False
-            try:
-                self.app.dialog_area.update()
-            except Exception:
-                pass
-
-        async def submit(_=None):
-            url = (url_field.value or "").strip()
-            name = (name_field.value or "").strip()
-            if not url:
-                await self.app.snack_bar.show_snack_bar("请输入抖音主页链接", bgcolor=ft.Colors.ERROR)
-                return
-            try:
-                account, message = await self._add_account_with_auto_name(url, name)
-                self.selected_account_id = account.account_id
-                self.account_search_query = ""
-                await close_dialog()
-                await self.refresh_view()
-                self.safe_content_update()
-                await self.app.snack_bar.show_snack_bar(message, bgcolor=ft.Colors.PRIMARY, duration=4500, show_close_icon=True)
-            except Exception as exc:
-                await self.app.snack_bar.show_snack_bar(str(exc), bgcolor=ft.Colors.ERROR, duration=3500, show_close_icon=True)
-
-        url_field.on_submit = submit
-        name_field.on_submit = submit
-        dialog = ft.AlertDialog(
-            title=ft.Text("添加抖音监控用户", size=20, weight=ft.FontWeight.BOLD),
-            content=ft.Column([url_field, name_field], tight=True, spacing=10, width=540),
-            actions=[
-                ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=close_dialog),
-                ft.TextButton("添加", icon=ft.Icons.ADD, on_click=submit),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END,
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.add_account_controller.show_dialog(_e)
 
     async def show_batch_import_dialog(self):
-        async def close_dialog(_=None):
-            dialog = controls.dialog
-            dialog.open = False
-            self.app.dialog_area.update()
+        await self.batch_import_controller.show_dialog()
 
-        async def load_import_preview(import_controls: BatchImportControls) -> BatchImportPreview:
-            text_parts = [str(import_controls.text_field.value or "")]
-            file_path = str(import_controls.file_path_field.value or "").strip()
-            if file_path:
-                try:
-                    file_text = read_batch_import_file(file_path)
-                    text_parts.append(file_text)
-                except Exception as exc:
-                    preview = BatchImportPreview()
-                    preview.errors.append({"line_no": 0, "line": file_path, "reason": f"读取导入文件失败：{exc}"})
-                    return preview
-            return parse_batch_import_text(
-                "\n".join(text_parts),
-                default_group=import_controls.default_group.value or "",
-                existing_accounts=list(self.manager.accounts),
-            )
-
-        async def show_preview(import_controls: BatchImportControls, *, popup: bool = False) -> BatchImportPreview:
-            preview = await load_import_preview(import_controls)
-            lines = preview_to_report_lines(preview, limit=80)
-            import_controls.preview_text.value = preview.summary_text()
-            import_controls.preview_text.color = ft.Colors.PRIMARY if preview.valid_rows else ft.Colors.ERROR
-            try:
-                import_controls.preview_text.update()
-            except Exception:
-                pass
-            if popup:
-                await self.show_text_report_dialog("批量导入预览", lines)
-            return preview
-
-        async def pick_file(import_controls: BatchImportControls):
-            self._ensure_batch_import_picker(import_controls)
-            if self.batch_import_picker is None:
-                await self.app.snack_bar.show_snack_bar("当前环境不支持文件选择器，请手动粘贴 TXT / CSV 路径", bgcolor=ft.Colors.ERROR)
-                return
-            try:
-                self.batch_import_picker.pick_files(
-                    allow_multiple=False,
-                    allowed_extensions=["txt", "csv"],
-                    dialog_title="选择批量导入账号文件",
-                )
-            except Exception as exc:
-                logger.debug(f"open batch import picker failed: {exc}")
-                await self.app.snack_bar.show_snack_bar("打开文件选择器失败，请手动粘贴 TXT / CSV 路径", bgcolor=ft.Colors.ERROR)
-
-        async def submit(import_controls: BatchImportControls):
-            preview = await show_preview(import_controls)
-            rows = [row for row in preview.valid_rows]
-            if not rows:
-                await self.app.snack_bar.show_snack_bar("未识别到可导入的抖音主页链接，请先查看预览明细", bgcolor=ft.Colors.ERROR)
-                return
-            added = 0
-            updated = 0
-            failed = 0
-            hydrate_account_ids: list[str] = []
-            failure_lines: list[str] = []
-            should_start = bool(import_controls.start_switch.value)
-            if should_start and len(rows) >= 20:
-                await self.app.snack_bar.show_snack_bar("大批量导入已启用分批启动监控，请不要立即连续同步全部作品", bgcolor=ft.Colors.PRIMARY, duration=6000, show_close_icon=True)
-            for row in rows:
-                try:
-                    before_ids = {account.account_id for account in self.manager.accounts}
-                    account = await self.manager.add_account(row.normalized_url, row.name)
-                    if not row.name:
-                        hydrate_account_ids.append(account.account_id)
-                    if account.account_id in before_ids:
-                        updated += 1
-                    else:
-                        added += 1
-                    await self.manager.update_account_settings(
-                        account.account_id,
-                        display_name=row.name or account.display_name,
-                        group_name=row.group,
-                        auto_download_policy=import_controls.policy_dropdown.value or "none",
-                        notify_enabled=bool(import_controls.notify_switch.value),
-                    )
-                    if should_start:
-                        await self.manager.start_monitor(account.account_id)
-                except Exception as exc:
-                    failed += 1
-                    failure_lines.append(f"第 {row.line_no} 行 {row.normalized_url}：{exc}")
-                    logger.debug(f"batch import account failed: {row.normalized_url}, error={exc}")
-            await close_dialog()
-            await self.render_current_view()
-            if hydrate_account_ids:
-                self._schedule_batch_name_hydration(hydrate_account_ids)
-            counts = preview.counts()
-            self.batch_result_lines = [preview.summary_text(), f"导入执行：新增 {added}，更新 {updated}，失败 {failed}"]
-            self.batch_result_lines.extend(failure_lines[:100])
-            suffix = f"，跳过重复 {counts.get('duplicate', 0)}，无效 {counts.get('invalid', 0)}"
-            if hydrate_account_ids:
-                suffix += f"，{len(hydrate_account_ids)} 个未填备注账号将在后台补全昵称"
-            await self.app.snack_bar.show_snack_bar(
-                f"批量导入完成：新增 {added}，更新 {updated}，失败 {failed}{suffix}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=7000,
-                show_close_icon=True,
-            )
-
-        controls = build_batch_import_dialog(
-            lambda c: self.run_async(submit(c)),
-            close_dialog,
-            on_preview=lambda c: self.run_async(show_preview(c, popup=True)),
-            on_pick_file=lambda c: self.run_async(pick_file(c)),
-        )
-        dialog = controls.dialog
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
-
-    def _ensure_batch_import_picker(self, import_controls: BatchImportControls) -> None:
-        if not hasattr(ft, "FilePicker"):
-            return
-        if self.batch_import_picker is not None:
-            try:
-                if self.batch_import_picker not in self.page.overlay:
-                    self.page.overlay.append(self.batch_import_picker)
-                    self.page.update()
-            except Exception as exc:
-                logger.debug(f"remount batch import picker failed: {exc}")
-            return
-
-        def on_result(event) -> None:
-            try:
-                files = list(getattr(event, "files", None) or [])
-                path = str(getattr(files[0], "path", "") or "") if files else ""
-                if path:
-                    import_controls.file_path_field.value = path
-                    import_controls.file_path_field.update()
-                    import_controls.preview_text.value = "已选择文件，请点击“预览”检查重复和无效行。"
-                    import_controls.preview_text.color = ft.Colors.PRIMARY
-                    import_controls.preview_text.update()
-            except Exception as exc:
-                logger.debug(f"batch import picker result failed: {exc}")
-
-        try:
-            self.batch_import_picker = ft.FilePicker(on_result=on_result)
-            if self.batch_import_picker not in self.page.overlay:
-                self.page.overlay.append(self.batch_import_picker)
-                self.page.update()
-        except Exception as exc:
-            logger.debug(f"create batch import picker failed: {exc}")
-            self.batch_import_picker = None
+    def _ensure_batch_import_picker(self, import_controls) -> None:
+        self.batch_import_controller.ensure_file_picker(import_controls)
 
     def _parse_batch_import_rows(self, text: str, default_group: str = "") -> list[dict[str, str]]:
-        preview = parse_batch_import_text(text, default_group=default_group, existing_accounts=list(self.manager.accounts))
-        return [
-            {"url": row.normalized_url, "name": row.name, "group": row.group, "action": row.action, "reason": row.reason}
-            for row in preview.valid_rows
-        ]
+        return self.batch_import_controller.parse_rows(text, default_group=default_group)
 
     async def show_text_report_dialog(self, title: str, lines: list[str]) -> None:
-        def close_dialog(_=None):
-            dialog.open = False
-            self.app.dialog_area.update()
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(title),
-            content=ft.Column(
-                controls=[ft.Text("\n".join(lines), selectable=True, size=12)],
-                tight=True,
-                width=760,
-                scroll=ft.ScrollMode.AUTO,
-            ),
-            actions=[ft.TextButton("关闭", icon=ft.Icons.CLOSE, on_click=close_dialog)],
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.batch_import_controller.show_text_report_dialog(title, lines)
 
     def _schedule_batch_name_hydration(self, account_ids: list[str]) -> None:
-        unique_ids = list(dict.fromkeys([account_id for account_id in account_ids if account_id]))
-        if not unique_ids:
-            return
-        try:
-            asyncio.create_task(self._hydrate_batch_account_names(unique_ids))
-        except RuntimeError:
-            self.run_async(self._hydrate_batch_account_names(unique_ids))
+        self.batch_import_controller.schedule_name_hydration(account_ids)
 
     async def _hydrate_batch_account_names(self, account_ids: list[str]) -> None:
-        success = 0
-        failed = 0
-        for account_id in account_ids:
-            try:
-                result = await self.manager.hydrate_account_display_name(account_id, force=True)
-                if result.get("success"):
-                    success += 1
-                else:
-                    failed += 1
-            except Exception as exc:
-                failed += 1
-                logger.debug(f"batch import background hydrate nickname failed: account={account_id}, error={exc}")
-            await asyncio.sleep(0.8)
-        try:
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar(
-                f"批量昵称后台补全完成：成功 {success}，未获取 {failed}",
-                bgcolor=ft.Colors.PRIMARY if success else ft.Colors.ON_SURFACE_VARIANT,
-                duration=4000,
-                show_close_icon=True,
-            )
-        except Exception as exc:
-            logger.debug(f"batch import background hydrate UI refresh failed: {exc}")
-
-    def _parse_batch_import_rows(self, text: str, default_group: str = "") -> list[dict[str, str]]:
-        rows: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for raw_line in str(text or "").splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            url_match = re.search(r"https?://[^\s,，\t]+", line, re.IGNORECASE)
-            if not url_match:
-                continue
-            url = url_match.group(0).strip()
-            if url in seen:
-                continue
-            seen.add(url)
-            rest = (line[: url_match.start()] + " " + line[url_match.end() :]).strip(" ,，\t")
-            parts = [part.strip() for part in re.split(r"[,，\t]", rest) if part.strip()]
-            name = parts[0] if parts else ""
-            group = parts[1] if len(parts) > 1 else str(default_group or "").strip()
-            rows.append({"url": url, "name": name, "group": group})
-        return rows
+        await self.batch_import_controller.hydrate_account_names(account_ids)
 
     async def search_accounts_on_click(self, _e=None):
         query_field = ft.TextField(
@@ -1528,135 +977,13 @@ class DouyinContentMonitorPage(PageBase):
         self.app.dialog_area.update()
 
     async def show_edit_account_dialog(self, account_id: str):
-        account = self.manager.find_account(account_id)
-        if not account:
-            await self.app.snack_bar.show_snack_bar("账号不存在", bgcolor=ft.Colors.ERROR)
-            return
-        name_field = ft.TextField(label="备注名称", value=account.display_name or "", width=520)
-        group_field = ft.TextField(label="分组", value=account.group_name or "", hint_text="例如：重点、舞蹈、美食", width=520)
-        notify_switch = ft.Switch(label="发现新作品时通知", value=bool(account.notify_enabled))
-        interval_field = ft.TextField(label="单账号检测间隔（分钟，0=使用全局）", value=str(getattr(account, "monitor_interval_minutes", 0) or 0), width=250, keyboard_type=ft.KeyboardType.NUMBER)
-        pause_failures_field = ft.TextField(label="连续失败自动暂停（0=关闭）", value=str(getattr(account, "auto_pause_failures", 0) or 0), width=250, keyboard_type=ft.KeyboardType.NUMBER)
-        keep_recent_field = ft.TextField(label="仅保留最近 N 个作品（0=不限制）", value=str(getattr(account, "keep_recent_count", 0) or 0), width=250, keyboard_type=ft.KeyboardType.NUMBER)
-        auto_sync_switch = ft.Switch(label="检测时自动同步作品资料", value=bool(getattr(account, "auto_sync_enabled", True)))
-        notify_mode_dropdown = ft.Dropdown(
-            label="新作品提醒方式",
-            value=getattr(account, "notify_mode", "desktop") or "desktop",
-            width=250,
-            options=[
-                ft.dropdown.Option("desktop", "桌面通知"),
-                ft.dropdown.Option("task", "仅任务中心"),
-                ft.dropdown.Option("silent", "静默记录"),
-            ],
-        )
-        policy_dropdown = ft.Dropdown(
-            label="新增作品自动下载",
-            value=account.auto_download_policy or "none",
-            width=300,
-            options=[
-                ft.dropdown.Option("none", "不自动下载"),
-                ft.dropdown.Option("video", "只下载视频"),
-                ft.dropdown.Option("gallery", "只下载图集"),
-                ft.dropdown.Option("all", "自动下载全部"),
-            ],
-        )
-
-        async def close_dialog(_=None):
-            dialog.open = False
-            self.app.dialog_area.update()
-
-        async def submit(_=None):
-            try:
-                monitor_interval = max(0.0, float((interval_field.value or "0").strip() or 0))
-                auto_pause_failures = max(0, int((pause_failures_field.value or "0").strip() or 0))
-                keep_recent_count = max(0, int((keep_recent_field.value or "0").strip() or 0))
-            except ValueError:
-                await self.app.snack_bar.show_snack_bar("监控策略请输入有效数字", bgcolor=ft.Colors.ERROR)
-                return
-
-            ok = await self.manager.update_account_settings(
-                account_id,
-                display_name=(name_field.value or "").strip(),
-                group_name=(group_field.value or "").strip(),
-                auto_download_policy=policy_dropdown.value or "none",
-                monitor_interval_minutes=monitor_interval,
-                auto_sync_enabled=bool(auto_sync_switch.value),
-                auto_pause_failures=auto_pause_failures,
-                keep_recent_count=keep_recent_count,
-                notify_mode=notify_mode_dropdown.value or "desktop",
-                notify_enabled=bool(notify_switch.value),
-            )
-            await close_dialog()
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar("账号设置已保存" if ok else "账号不存在", bgcolor=ft.Colors.PRIMARY if ok else ft.Colors.ERROR)
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("编辑监控账号"),
-            content=ft.Column(
-                controls=[
-                    name_field,
-                    group_field,
-                    ft.Row([interval_field, pause_failures_field], spacing=10, wrap=True),
-                    ft.Row([keep_recent_field, notify_mode_dropdown], spacing=10, wrap=True),
-                    auto_sync_switch,
-                    ft.Row(
-                        [
-                            policy_dropdown,
-                            ft.IconButton(
-                                icon=ft.Icons.INFO_OUTLINE,
-                                tooltip="自动下载只对后续新增作品生效；已有作品请在作品页手动下载。",
-                                icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                            ),
-                        ],
-                        spacing=8,
-                    ),
-                    notify_switch,
-                ],
-                tight=True,
-                spacing=10,
-                width=540,
-            ),
-            actions=[
-                ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=close_dialog),
-                ft.FilledButton("保存", icon=ft.Icons.SAVE, on_click=submit),
-            ],
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.account_controller.show_edit_dialog(account_id)
 
     async def add_account_on_click(self, _e=None):
-        url = self.url_input.value.strip() if self.url_input else ""
-        name = self.name_input.value.strip() if self.name_input else ""
-        if not url:
-            await self.app.snack_bar.show_snack_bar(self._.get("url_required", "请输入抖音主页链接"), bgcolor=ft.Colors.ERROR)
-            return
-        try:
-            account, message = await self._add_account_with_auto_name(url, name)
-            self.selected_account_id = account.account_id
-            if self.url_input:
-                self.url_input.value = ""
-            if self.name_input:
-                self.name_input.value = ""
-            await self.refresh_view()
-            self.safe_content_update()
-            await self.app.snack_bar.show_snack_bar(message, bgcolor=ft.Colors.PRIMARY, duration=4500, show_close_icon=True)
-        except Exception as exc:
-            await self.app.snack_bar.show_snack_bar(str(exc), bgcolor=ft.Colors.ERROR, duration=3000, show_close_icon=True)
+        await self.add_account_controller.add_from_inline_inputs()
 
     async def _add_account_with_auto_name(self, url: str, name: str):
-        manual_name = str(name or "").strip()
-        account = await self.manager.add_account(url, manual_name)
-        if manual_name:
-            return account, "已添加抖音监控用户"
-
-        result = await self.manager.hydrate_account_display_name(account.account_id, force=True)
-        account = self.manager.find_account(account.account_id) or account
-        display_name = account.display_name or account.douyin_nickname or "抖音用户"
-        if result.get("success") and display_name != "抖音用户":
-            return account, f"已添加抖音监控用户，自动填充昵称：{display_name}"
-        return account, "已添加抖音监控用户，暂未获取到昵称，可稍后检测一次自动更新"
+        return await self.add_account_controller.add_account_with_auto_name(url, name)
 
     async def refresh_on_click(self, _e=None):
         await self.refresh_view()
@@ -1664,126 +991,16 @@ class DouyinContentMonitorPage(PageBase):
         await self.app.snack_bar.show_snack_bar("已刷新本地界面；需要请求抖音请使用“快速检测更新”或“同步作品列表”。", bgcolor=ft.Colors.PRIMARY, duration=3000)
 
     def _monitor_export_dir(self) -> str:
-        return os.path.join(self.app.run_path, "downloads", "monitor_exports")
+        return self.export_controller.export_dir()
 
     async def open_monitor_export_dir(self):
-        path = self._monitor_export_dir()
-        os.makedirs(path, exist_ok=True)
-        await self.open_path_or_url(path, success="已打开导出目录")
+        await self.export_controller.open_export_dir()
 
     async def export_monitor_csv(self):
-        export_dir = self._monitor_export_dir()
-        os.makedirs(export_dir, exist_ok=True)
-        path = os.path.join(export_dir, f"douyin_monitor_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        with open(path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "账号备注",
-                    "抖音昵称",
-                    "分组",
-                    "主页链接",
-                    "监控状态",
-                    "通知",
-                    "自动下载",
-                    "最近检测",
-                    "最近成功",
-                    "账号状态",
-                    "错误原因",
-                    "作品ID",
-                    "作品标题",
-                    "作品类型",
-                    "作品状态",
-                    "发布时间",
-                    "首次发现",
-                    "作品链接",
-                ]
-            )
-            for account in self.manager.accounts:
-                items = [item for item in account.items if item.status != "count_only"] or [None]
-                for item in items:
-                    writer.writerow(
-                        [
-                            account.display_name,
-                            account.douyin_nickname,
-                            account.group_name,
-                            account.homepage_url,
-                            "监控中" if account.monitor_enabled else "未监控",
-                            "开启" if account.notify_enabled else "关闭",
-                            self._auto_download_policy_label(account.auto_download_policy),
-                            account.last_check_time,
-                            account.last_success_time,
-                            account.status,
-                            account.last_error,
-                            getattr(item, "item_id", "") if item else "",
-                            getattr(item, "title", "") if item else "",
-                            "图集" if item and self._is_gallery_item(item) else ("视频" if item else ""),
-                            getattr(item, "status", "") if item else "",
-                            getattr(item, "publish_time", "") if item else "",
-                            getattr(item, "first_seen_time", "") if item else "",
-                            getattr(item, "share_url", "") if item else "",
-                        ]
-                    )
-        await self.app.snack_bar.show_snack_bar(f"已导出：{path}", bgcolor=ft.Colors.PRIMARY, duration=6000, show_close_icon=True)
+        await self.export_controller.export_works_csv()
 
     async def export_monitor_accounts_csv(self):
-        export_dir = self._monitor_export_dir()
-        os.makedirs(export_dir, exist_ok=True)
-        path = os.path.join(export_dir, f"douyin_monitor_accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        accounts = list(self.manager.accounts)
-        with open(path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "账号ID",
-                    "备注名称",
-                    "抖音昵称",
-                    "分组",
-                    "主页链接",
-                    "监控状态",
-                    "账号状态",
-                    "通知",
-                    "自动下载",
-                    "检测间隔分钟",
-                    "失败暂停次数",
-                    "保留最近作品数",
-                    "最近检测",
-                    "最近成功",
-                    "最近新增",
-                    "累计新增",
-                    "作品数",
-                    "资料作品数",
-                    "错误次数",
-                    "最近错误",
-                ]
-            )
-            for account in accounts:
-                items = [item for item in getattr(account, "items", []) if getattr(item, "status", "") != "count_only"]
-                writer.writerow(
-                    [
-                        account.account_id,
-                        account.display_name,
-                        account.douyin_nickname,
-                        account.group_name,
-                        account.homepage_url,
-                        "监控中" if account.monitor_enabled else "未监控",
-                        account.status,
-                        "开启" if account.notify_enabled else "关闭",
-                        self._auto_download_policy_label(account.auto_download_policy),
-                        account.monitor_interval_minutes or "全局",
-                        account.auto_pause_failures,
-                        account.keep_recent_count or "不限",
-                        account.last_check_time,
-                        account.last_success_time,
-                        account.last_new_count,
-                        account.total_new_count,
-                        len(items),
-                        account.aweme_count if account.aweme_count >= 0 else "",
-                        account.error_count,
-                        account.last_error,
-                    ]
-                )
-        await self.app.snack_bar.show_snack_bar(f"监控用户已导出：{path}", bgcolor=ft.Colors.PRIMARY, duration=6000, show_close_icon=True)
+        await self.export_controller.export_accounts_csv()
 
     async def set_account_filter(self, mode: str):
         self.account_filter = str(mode or "all")
@@ -1821,60 +1038,19 @@ class DouyinContentMonitorPage(PageBase):
         await self.render_current_view()
 
     async def open_new_work_inbox(self):
-        self.view_mode = "inbox"
-        self.work_select_mode = False
-        self.selected_work_ids.clear()
-        self.inbox_visible_count = self.work_page_size
-        await self.render_current_view()
+        await self.inbox_controller.open()
 
     async def open_error_repair_center(self):
-        self.view_mode = "accounts"
-        self.account_filter = "error"
-        self.account_visible_count = self.account_page_size
-        await self.render_current_view()
+        await self.error_repair_controller.open()
 
     async def check_error_accounts_on_click(self):
-        accounts = self._error_accounts()
-        success, failed, _ = await self._run_account_batch(
-            accounts,
-            "重新检测异常账号",
-            "异常修复",
-            lambda account: self.manager.check_account(account.account_id, notify=True),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"异常账号检测完成：成功 {success}，失败 {failed}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.error_repair_controller.check_accounts()
 
     async def sync_error_accounts_on_click(self):
-        accounts = self._error_accounts()
-        success, failed, new_total = await self._run_account_batch(
-            accounts,
-            "同步异常账号作品",
-            "异常修复",
-            lambda account: self.manager.sync_account_works(account.account_id),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"异常账号同步完成：成功 {success}，失败 {failed}，新增 {new_total}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.error_repair_controller.sync_accounts()
 
     async def copy_error_summary(self):
-        accounts = self._error_accounts()
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("当前没有异常账号", bgcolor=ft.Colors.PRIMARY)
-            return
-        lines = ["异常账号摘要："]
-        for account in accounts[:300]:
-            bucket = self._error_bucket(account)
-            lines.append(f"[{bucket}] {account.display_name or account.douyin_nickname or account.account_id} | {account.homepage_url} | {account.status} | {account.last_error}")
-        await self.copy_text("\n".join(lines))
+        await self.error_repair_controller.copy_summary()
 
     async def back_to_accounts(self):
         anchor_id = self.return_account_anchor_id or self.selected_account_id
@@ -1886,104 +1062,19 @@ class DouyinContentMonitorPage(PageBase):
         await self.render_current_view()
 
     async def preview_inbox_item(self, account_id: str, item_id: str, is_gallery: bool):
-        previous_account = self.selected_account_id
-        previous_mode = self.view_mode
-        self.selected_account_id = account_id
-        try:
-            if is_gallery:
-                await self.preview_item_images(item_id)
-            else:
-                await self.browse_video(item_id)
-        finally:
-            self.selected_account_id = previous_account
-            self.view_mode = previous_mode
+        await self.inbox_controller.preview_item(account_id, item_id, is_gallery)
 
     async def download_inbox_item(self, account_id: str, item_id: str):
-        previous_account = self.selected_account_id
-        previous_mode = self.view_mode
-        self.selected_account_id = account_id
-        try:
-            await self.download_one(item_id)
-        finally:
-            self.selected_account_id = previous_account
-            self.view_mode = previous_mode
-            await self.render_current_view()
+        await self.inbox_controller.download_item(account_id, item_id)
 
     async def download_new_inbox_items(self):
-        entries = self._new_work_entries()
-        if not entries:
-            await self.app.snack_bar.show_snack_bar("暂无新作品可下载", bgcolor=ft.Colors.PRIMARY)
-            return
-        grouped: dict[str, list[str]] = {}
-        for account, item in entries:
-            grouped.setdefault(account.account_id, []).append(item.item_id)
-        self.download_in_progress = True
-        self.download_stop_requested = False
-        await self.set_loading(True)
-        try:
-            success = 0
-            failed = 0
-            stopped = False
-            for account_id, item_ids in grouped.items():
-                part_success, part_failed, part_stopped = await self._download_items_until_stopped(account_id, item_ids)
-                success += part_success
-                failed += part_failed
-                stopped = stopped or part_stopped
-                if stopped:
-                    break
-            await self.app.snack_bar.show_snack_bar(
-                f"{'下载已停止' if stopped else '新作品下载完成'}：成功 {success}，失败 {failed}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=6000,
-                show_close_icon=True,
-            )
-        finally:
-            self.download_in_progress = False
-            self.download_stop_requested = False
-            await self.set_loading(False)
-            await self.render_current_view()
+        await self.inbox_controller.download_all()
 
     async def mark_item_seen(self, account_id: str, item_id: str):
-        if hasattr(self.manager, "mark_items_seen_batch"):
-            await self.manager.mark_items_seen_batch([(account_id, item_id)])
-        else:
-            account = self.manager.find_account(account_id)
-            item = next((candidate for candidate in getattr(account, "items", []) if candidate.item_id == item_id), None) if account else None
-            if item is None:
-                return
-            if self._is_count_only_item(item):
-                account.items = [candidate for candidate in getattr(account, "items", []) if candidate.item_id != item_id]
-            elif item.status == "new":
-                item.status = "active"
-            self._sync_account_last_new_count(account)
-            await self.manager.persist(force=True)
-        await self.render_current_view()
-        await self.app.snack_bar.show_snack_bar("已标记为已处理", bgcolor=ft.Colors.PRIMARY)
+        await self.inbox_controller.mark_item_seen(account_id, item_id)
 
     async def mark_all_new_items_seen(self):
-        pairs = [(account.account_id, item.item_id) for account, item in list(self._new_work_entries())]
-        if hasattr(self.manager, "mark_items_seen_batch"):
-            result = await self.manager.mark_items_seen_batch(pairs)
-            changed = int(result.get("changed", 0) or 0)
-        else:
-            changed = 0
-            touched_accounts: set[str] = set()
-            for account, item in list(self._new_work_entries()):
-                if self._is_count_only_item(item):
-                    account.items = [candidate for candidate in getattr(account, "items", []) if candidate.item_id != item.item_id]
-                    changed += 1
-                    touched_accounts.add(account.account_id)
-                elif item.status == "new":
-                    item.status = "active"
-                    changed += 1
-                    touched_accounts.add(account.account_id)
-            if touched_accounts:
-                for account in self.manager.accounts:
-                    if account.account_id in touched_accounts:
-                        self._sync_account_last_new_count(account)
-                await self.manager.persist(force=True)
-        await self.render_current_view()
-        await self.app.snack_bar.show_snack_bar(f"已标记 {changed} 个新作品为已处理", bgcolor=ft.Colors.PRIMARY)
+        await self.inbox_controller.mark_all_seen()
 
     @staticmethod
     def _account_anchor_key(account_id: str) -> str:
@@ -2038,12 +1129,8 @@ class DouyinContentMonitorPage(PageBase):
     async def load_more_works(self):
         if self.view_mode == "inbox":
             self.inbox_visible_count += self.work_page_size
-            await self.refresh_new_work_inbox()
-        else:
-            self.visible_work_count += self.work_page_size
-            await self.refresh_works()
-        if self.history_area:
-            self.history_area.update()
+            self.inbox_visible_count -= self.work_page_size
+        await self.work_controller.load_more()
 
     async def toggle_account_select_mode(self):
         if self.batch_job_running:
@@ -2106,317 +1193,19 @@ class DouyinContentMonitorPage(PageBase):
         self._update_batch_account_toolbar_fast()
 
     def _selected_accounts(self) -> list[DouyinMonitorAccount]:
-        selected = set(self.selected_account_ids)
-        return [account for account in self.manager.accounts if account.account_id in selected]
+        return self.account_batch_controller.selected_accounts()
 
     async def show_batch_account_settings_dialog(self):
-        accounts = self._selected_accounts()
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
-            return
-        update_group_checkbox = ft.Checkbox(label="修改分组", value=False)
-        update_policy_checkbox = ft.Checkbox(label="修改自动下载策略", value=False)
-        update_notify_checkbox = ft.Checkbox(label="修改通知策略", value=False)
-        group_field = ft.TextField(label="统一设置分组", hint_text="勾选“修改分组”后生效；留空可设为未分组", width=420, disabled=True)
-        policy_dropdown = ft.Dropdown(
-            label="新增作品自动下载",
-            value="all",
-            width=300,
-            disabled=True,
-            options=[
-                ft.dropdown.Option("none", "不自动下载"),
-                ft.dropdown.Option("video", "只下载视频"),
-                ft.dropdown.Option("gallery", "只下载图集"),
-                ft.dropdown.Option("all", "自动下载全部"),
-            ],
-        )
-        notify_dropdown = ft.Dropdown(
-            label="新作品通知",
-            value="on",
-            width=300,
-            disabled=True,
-            options=[
-                ft.dropdown.Option("on", "开启通知"),
-                ft.dropdown.Option("off", "关闭通知"),
-            ],
-        )
-
-        def update_enabled_controls(_=None):
-            group_field.disabled = not bool(update_group_checkbox.value)
-            policy_dropdown.disabled = not bool(update_policy_checkbox.value)
-            notify_dropdown.disabled = not bool(update_notify_checkbox.value)
-            selected_count = sum(1 for item in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox] if item.value)
-            status_text.value = (
-                f"已选择 {selected_count} 项要修改。未勾选的项目保持不变。"
-                if selected_count
-                else "请先勾选要修改的项目，未勾选项目会保持不变。"
-            )
-            try:
-                self.app.dialog_area.update()
-            except Exception:
-                pass
-
-        update_group_checkbox.on_change = update_enabled_controls
-        update_policy_checkbox.on_change = update_enabled_controls
-        update_notify_checkbox.on_change = update_enabled_controls
-
-        async def close_dialog(_=None):
-            dialog.open = False
-            self.app.dialog_area.update()
-
-        status_text = ft.Text("请先勾选要修改的项目，未勾选项目会保持不变。", size=12, color=ft.Colors.ON_SURFACE_VARIANT)
-        submitting = False
-
-        async def submit(_=None):
-            nonlocal submitting
-            if submitting:
-                return
-            wants_group = bool(update_group_checkbox.value)
-            wants_policy = bool(update_policy_checkbox.value)
-            wants_notify = bool(update_notify_checkbox.value)
-            if not any([wants_group, wants_policy, wants_notify]):
-                await self.app.snack_bar.show_snack_bar("没有选择要修改的设置", bgcolor=ft.Colors.ERROR)
-                return
-            group_value = str(group_field.value or "").strip()
-            policy_value = str(policy_dropdown.value or "all")
-            notify_value = str(notify_dropdown.value or "on")
-            update_payload = {
-                "group_name": group_value if wants_group else None,
-                "auto_download_policy": policy_value if wants_policy else None,
-                "notify_enabled": (True if notify_value == "on" else False) if wants_notify else None,
-            }
-            submitting = True
-            save_button.disabled = True
-            cancel_button.disabled = True
-            for control in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox, group_field, policy_dropdown, notify_dropdown]:
-                control.disabled = True
-            status_text.value = f"正在批量保存 {len(accounts)} 个账号，请勿重复点击..."
-            try:
-                self.app.dialog_area.update()
-            except Exception:
-                pass
-            try:
-                updater = getattr(self.manager, "update_account_settings_batch", None)
-                if callable(updater):
-                    result = await updater([account.account_id for account in accounts], **update_payload)
-                    updated = int(result.get("updated") or 0) if isinstance(result, dict) else 0
-                    changed = int(result.get("changed") or updated) if isinstance(result, dict) else updated
-                else:
-                    updated = 0
-                    changed = 0
-                    for account in accounts:
-                        ok = await self.manager.update_account_settings(account.account_id, **update_payload)
-                        if ok:
-                            updated += 1
-                            changed += 1
-                await close_dialog()
-                await self.render_current_view()
-                await self.app.snack_bar.show_snack_bar(
-                    f"批量设置已保存：处理 {updated} 个账号，实际变更 {changed} 个",
-                    bgcolor=ft.Colors.PRIMARY,
-                    duration=5000,
-                    show_close_icon=True,
-                )
-            except Exception as exc:
-                submitting = False
-                save_button.disabled = False
-                cancel_button.disabled = False
-                for control in [update_group_checkbox, update_policy_checkbox, update_notify_checkbox]:
-                    control.disabled = False
-                update_enabled_controls()
-                status_text.value = f"保存失败：{exc}"
-                try:
-                    self.app.dialog_area.update()
-                except Exception:
-                    pass
-                await self.app.snack_bar.show_snack_bar(f"批量设置保存失败：{exc}", bgcolor=ft.Colors.ERROR)
-
-        cancel_button = ft.TextButton("取消", icon=ft.Icons.CLOSE, on_click=close_dialog)
-        save_button = ft.FilledButton("保存选中修改项", icon=ft.Icons.SAVE, on_click=submit)
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(f"批量设置 {len(accounts)} 个账号"),
-            content=ft.Column(
-                controls=[
-                    ft.Text("只会修改已勾选的项目，未勾选项目保持不变，避免误改账号配置。", size=12, color=ft.Colors.ON_SURFACE_VARIANT),
-                    ft.Row([update_group_checkbox, group_field], spacing=8, wrap=True),
-                    ft.Row([update_policy_checkbox, policy_dropdown], spacing=8, wrap=True),
-                    ft.Row([update_notify_checkbox, notify_dropdown], spacing=8, wrap=True),
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.INFO_OUTLINE, color=ft.Colors.ON_SURFACE_VARIANT, size=18),
-                            status_text,
-                        ],
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                ],
-                tight=True,
-                spacing=10,
-                width=620,
-            ),
-            actions=[cancel_button, save_button],
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.batch_settings_controller.show_dialog()
 
     async def _run_selected_account_job(self, title: str, category: str, job) -> tuple[int, int, int]:
-        return await self._run_account_batch(self._selected_accounts(), title, category, job)
+        return await self.account_batch_controller.run_selected_job(title, category, job)
 
     async def _run_account_batch(self, accounts: list[DouyinMonitorAccount], title: str, category: str, job) -> tuple[int, int, int]:
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
-            return 0, 0, 0
-        if self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
-            return 0, 0, 0
-        self.batch_job_running = True
-        self.batch_cancel_requested = False
-        self.batch_progress_cancelled = False
-        self._set_batch_progress_state(title=title, completed=0, total=len(accounts), success=0, failed=0, new_total=0)
-        await self.set_loading(True)
-        await self.render_current_view()
-        task_center = getattr(self.app.services, "task_center", None)
-        task_id = task_center.start(title, category, total=len(accounts)) if task_center else None
-        success = 0
-        failed = 0
-        new_total = 0
-        completed = 0
-        result_lines: list[str] = []
-        cancelled = False
-        queue: asyncio.Queue[DouyinMonitorAccount] = asyncio.Queue()
-        for account in accounts:
-            queue.put_nowait(account)
-        progress_lock = asyncio.Lock()
-        last_progress_update = 0.0
-        concurrency = min(self._account_batch_parallel_limit(), max(1, len(accounts)))
-
-        async def publish_progress(current: str = "", *, force: bool = False, final: bool = False) -> None:
-            nonlocal last_progress_update
-            now = time.monotonic()
-            if not force and not final and now - last_progress_update < 0.25:
-                return
-            last_progress_update = now
-            self._set_batch_progress_state(
-                title=title,
-                completed=completed,
-                total=len(accounts),
-                success=success,
-                failed=failed,
-                new_total=new_total,
-                current=current,
-                cancelled=cancelled,
-                final=final,
-            )
-            if task_center and task_id:
-                task_center.progress(
-                    task_id,
-                    completed=completed,
-                    success_count=success,
-                    failed_count=failed,
-                    detail=self.batch_progress_text,
-                )
-            self._update_batch_progress_controls()
-            await asyncio.sleep(0)
-
-        async def worker() -> None:
-            nonlocal success, failed, new_total, completed, cancelled
-            while True:
-                if self.batch_cancel_requested:
-                    cancelled = True
-                    return
-                try:
-                    account = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                name = account.display_name or account.douyin_nickname or account.account_id
-                try:
-                    async with progress_lock:
-                        await publish_progress(name, force=True)
-                    result = job(account)
-                    if inspect.isawaitable(result):
-                        result = await result
-                    ok = bool(result.get("success")) if isinstance(result, dict) else bool(result)
-                    async with progress_lock:
-                        completed += 1
-                        if ok:
-                            success += 1
-                            reason = str(result.get("reason") or "成功") if isinstance(result, dict) else "成功"
-                            result_lines.append(f"[成功] {name}：{reason}")
-                            if isinstance(result, dict):
-                                try:
-                                    new_total += int(result.get("new") or len(result.get("new_items") or []))
-                                except (TypeError, ValueError):
-                                    pass
-                        else:
-                            failed += 1
-                            reason = str(result.get("reason") or "失败") if isinstance(result, dict) else "失败"
-                            result_lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
-                        await publish_progress(name, force=True)
-                except asyncio.CancelledError:
-                    async with progress_lock:
-                        cancelled = True
-                        result_lines.append(f"[取消] {name}：任务已取消")
-                        await publish_progress(name, force=True)
-                    raise
-                except Exception as exc:
-                    async with progress_lock:
-                        completed += 1
-                        failed += 1
-                        reason = str(exc) or exc.__class__.__name__
-                        result_lines.append(f"[失败] {name}：{reason}｜{self._batch_failure_advice(reason)}")
-                        await publish_progress(name, force=True)
-                    logger.debug(f"{title} failed for account={account.account_id}: {exc}")
-                finally:
-                    try:
-                        queue.task_done()
-                    except ValueError:
-                        pass
-
-        workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-        try:
-            await asyncio.gather(*workers)
-            if self.batch_cancel_requested:
-                cancelled = True
-                result_lines.append("[取消] 用户已取消批量任务，未开始的账号已跳过")
-        finally:
-            for task in workers:
-                if not task.done():
-                    task.cancel()
-            if task_center and task_id:
-                detail = f"已取消：成功 {success}，失败 {failed}，新增 {new_total}" if cancelled else f"完成：成功 {success}，失败 {failed}，新增 {new_total}"
-                if cancelled and hasattr(task_center, "cancel"):
-                    task_center.cancel(task_id, detail)
-                else:
-                    task_center.finish(task_id, success=(failed == 0 and not cancelled), detail=detail)
-            self.batch_result_lines = result_lines[-200:]
-            self._set_batch_progress_state(
-                title=title,
-                completed=completed,
-                total=len(accounts),
-                success=success,
-                failed=failed,
-                new_total=new_total,
-                cancelled=cancelled,
-                final=True,
-            )
-            self.batch_job_running = False
-            self.batch_cancel_requested = False
-            self._pending_monitor_refresh = False
-            await self.set_loading(False)
-            await self.render_current_view()
-        return success, failed, new_total
+        return await self.account_batch_controller.run_batch(accounts, title, category, job)
 
     async def cancel_batch_job(self):
-        if not self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("当前没有批量任务", bgcolor=ft.Colors.ERROR)
-            return
-        self.batch_cancel_requested = True
-        self.batch_progress_cancelled = True
-        self._set_batch_progress_state(cancelled=True)
-        self._update_batch_progress_controls()
-        await self.app.snack_bar.show_snack_bar("已请求取消，等待中的账号会跳过，正在请求的账号完成后停止", bgcolor=ft.Colors.PRIMARY)
+        await self.account_batch_controller.cancel_batch_job()
 
     async def show_batch_result_dialog(self):
         lines = self._latest_batch_result_lines()
@@ -2445,203 +1234,39 @@ class DouyinContentMonitorPage(PageBase):
         self.app.dialog_area.update()
 
     def _latest_batch_result_lines(self) -> list[str]:
-        if self.batch_result_lines:
-            return list(self.batch_result_lines)
-        task_center = getattr(getattr(self.app, "services", None), "task_center", None)
-        snapshot = getattr(task_center, "snapshot", None)
-        if not callable(snapshot):
-            return []
-        try:
-            records = snapshot(limit=30)
-        except Exception as exc:
-            logger.debug(f"load latest batch task results failed: {exc}")
-            return []
-        lines: list[str] = []
-        for record in records:
-            if not isinstance(record, dict) or not self._is_batch_task_record(record):
-                continue
-            title = str(record.get("title") or "批量任务")
-            status = str(record.get("status") or "-")
-            detail = str(record.get("detail") or "").strip()
-            updated = str(record.get("finished_at") or record.get("updated_at") or record.get("started_at") or "")
-            completed = int(record.get("completed") or 0)
-            total = int(record.get("total") or 0)
-            success = int(record.get("success_count") or 0)
-            failed = int(record.get("failed_count") or 0)
-            progress = f"{completed}/{total}" if total else str(completed or "-")
-            suffix = f"，{detail}" if detail else ""
-            lines.append(f"[任务] {title}｜{status}｜进度 {progress}｜成功 {success}，失败 {failed}｜{updated}{suffix}")
-            if len(lines) >= 20:
-                break
-        return lines
+        # task_center snapshot(limit=30) fallback is implemented in the account batch controller.
+        return self.account_batch_controller.latest_batch_result_lines()
 
     @staticmethod
     def _is_batch_task_record(record: dict[str, Any]) -> bool:
-        title = str(record.get("title") or "")
-        category = str(record.get("category") or "")
-        retry_action = str(record.get("retry_action") or "")
-        batch_markers = ("批量", "全部账号", "全部作品", "选中账号", "检测全部", "同步全部", "自动下载")
-        return (
-            any(marker in title for marker in batch_markers)
-            or any(marker in category for marker in ("作品监控", "内容监控", "自动下载"))
-            or retry_action in {"content_download_items", "content_sync_accounts", "content_check_accounts"}
-        )
+        return DouyinContentAccountBatchController.is_batch_task_record(record)
 
     async def start_selected_accounts(self):
-        accounts = self._selected_accounts()
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
-            return
-        if self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
-            return
-        await self.set_loading(True)
-        try:
-            result = await self.manager.set_monitor_enabled_batch([account.account_id for account in accounts], True)
-            changed = int(result.get("total") or 0) if isinstance(result, dict) else 0
-            self.batch_result_lines = [f"[成功] {account.display_name or account.douyin_nickname or account.account_id}：已开始监控" for account in accounts if account.monitor_enabled][-200:]
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar(
-                f"批量开始监控完成：变更 {changed} 个账号，未变更 {max(0, len(accounts) - changed)} 个",
-                bgcolor=ft.Colors.PRIMARY,
-                duration=5000,
-                show_close_icon=True,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.account_batch_controller.start_selected_accounts()
 
     async def stop_selected_accounts(self, confirmed: bool = False):
-        if not self.selected_account_ids:
-            await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
-            return
-        if self.batch_job_running:
-            await self.app.snack_bar.show_snack_bar("已有批量任务正在运行", bgcolor=ft.Colors.ERROR)
-            return
-        if not confirmed:
-            count = len(self.selected_account_ids)
-            self.show_confirm_dialog(
-                "确认批量停止",
-                f"将停止监控 {count} 个账号，是否继续？",
-                lambda: self.stop_selected_accounts(confirmed=True),
-            )
-            return
-
-        accounts = self._selected_accounts()
-        await self.set_loading(True)
-        try:
-            result = await self.manager.set_monitor_enabled_batch([account.account_id for account in accounts], False)
-            changed = int(result.get("total") or 0) if isinstance(result, dict) else 0
-            self.batch_result_lines = [f"[成功] {account.display_name or account.douyin_nickname or account.account_id}：已停止监控" for account in accounts if not account.monitor_enabled][-200:]
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar(
-                f"批量停止监控完成：变更 {changed} 个账号，未变更 {max(0, len(accounts) - changed)} 个",
-                bgcolor=ft.Colors.PRIMARY,
-                duration=5000,
-                show_close_icon=True,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.account_batch_controller.stop_selected_accounts(confirmed=confirmed)
 
     async def check_selected_accounts(self):
-        success, failed, _new_total = await self._run_selected_account_job(
-            "检测选中账号",
-            "内容监控",
-            lambda account: self.manager.check_account(account.account_id, notify=True),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"检测选中完成：成功 {success}，失败 {failed}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.account_batch_controller.check_selected_accounts()
 
     async def sync_selected_accounts(self):
-        success, failed, new_total = await self._run_selected_account_job(
-            "同步选中账号作品",
-            "作品监控",
-            lambda account: self.manager.sync_account_works(account.account_id),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"同步选中完成：成功 {success}，失败 {failed}，新增 {new_total}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.account_batch_controller.sync_selected_accounts()
 
     async def delete_selected_accounts(self, confirmed: bool = False):
-        accounts = self._selected_accounts()
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("请先选择账号", bgcolor=ft.Colors.ERROR)
-            return
-        if not confirmed:
-            names = [account.display_name or account.douyin_nickname or account.homepage_url or account.account_id for account in accounts[:5]]
-            suffix = "..." if len(accounts) > 5 else ""
-            self.show_confirm_dialog(
-                "确认批量删除",
-                f"将删除 {len(accounts)} 个账号及其监控记录：{', '.join(names)}{suffix}。是否继续？",
-                lambda: self.delete_selected_accounts(confirmed=True),
-            )
-            return
-        await self.set_loading(True)
-        try:
-            self.recent_deleted_accounts = [account.to_dict() for account in accounts]
-            self.deleted_account_batches.append(self.recent_deleted_accounts)
-            self.deleted_account_batches = self.deleted_account_batches[-10:]
-            result = await self.manager.delete_accounts_batch([account.account_id for account in accounts])
-            deleted_ids = set(result.get("account_ids") or []) if isinstance(result, dict) else set()
-            deleted = int(result.get("deleted") or len(deleted_ids)) if isinstance(result, dict) else len(deleted_ids)
-            lines = []
-            for account in accounts:
-                name = account.display_name or account.douyin_nickname or account.account_id
-                if account.account_id in deleted_ids:
-                    lines.append(f"[成功] {name}：已删除，可从恢复按钮找回")
-                else:
-                    lines.append(f"[失败] {name}：删除失败或账号不存在")
-            self.batch_result_lines = lines[-200:]
-            self.selected_account_ids.clear()
-            if self.selected_account_id and not self.manager.find_account(self.selected_account_id):
-                self.selected_account_id = None
-            await self.render_current_view()
-            await self.app.snack_bar.show_snack_bar(f"已删除 {deleted} 个账号", bgcolor=ft.Colors.PRIMARY)
-        finally:
-            await self.set_loading(False)
+        await self.account_batch_controller.delete_selected_accounts(confirmed=confirmed)
 
     async def toggle_work_select_mode(self):
-        self.work_select_mode = not self.work_select_mode
-        if not self.work_select_mode:
-            self.selected_work_ids.clear()
-        await self.refresh_works()
-        if self.history_area:
-            self.history_area.update()
-        self.safe_content_update()
+        await self.work_controller.toggle_select_mode()
 
     async def toggle_work_selected(self, item_id: str, selected: bool | None = None):
-        should_select = item_id not in self.selected_work_ids if selected is None else selected
-        if should_select:
-            self.selected_work_ids.add(item_id)
-        else:
-            self.selected_work_ids.discard(item_id)
-        await self.render_current_view()
+        await self.work_controller.toggle_selected(item_id, selected=selected)
 
     async def clear_selected_works(self):
-        self.selected_work_ids.clear()
-        await self.render_current_view()
+        await self.work_controller.clear_selected()
 
     async def select_all_visible_works(self):
-        account = self.manager.find_account(self.selected_account_id) if self.selected_account_id else None
-        if account is None:
-            return
-        visible_items = self.manager.sort_items_newest_first(self._filter_work_items(account.items, self.work_filter))[: self.visible_work_count]
-        visible_ids = {item.item_id for item in visible_items}
-        if self.selected_work_ids >= visible_ids and visible_ids:
-            self.selected_work_ids.difference_update(visible_ids)
-        else:
-            self.selected_work_ids.update(visible_ids)
-        await self.refresh_works()
-        if self.history_area:
-            self.history_area.update()
+        await self.work_controller.select_all_visible()
 
     async def stop_downloads(self):
         if not self.download_in_progress:
@@ -2654,125 +1279,7 @@ class DouyinContentMonitorPage(PageBase):
         await self.app.snack_bar.show_snack_bar("已请求停止下载，等待中的作品会立即跳过，正在下载的请求将尽快结束", bgcolor=ft.Colors.PRIMARY)
 
     async def _download_items_until_stopped(self, account_id: str, item_ids: list[str]) -> tuple[int, int, bool]:
-        success = 0
-        failed = 0
-        stopped = False
-        failed_reasons: list[str] = []
-        failed_item_ids: list[str] = []
-        unique_ids = list(dict.fromkeys(item_ids))
-        total = len(unique_ids)
-        task_center = getattr(self.app.services, "task_center", None)
-        task_id = None
-        if task_center is not None:
-            account = self.manager.find_account(account_id)
-            name = (account.display_name or account.douyin_nickname or account.account_id) if account else account_id
-            task_id = task_center.start(
-                f"批量下载：{name}",
-                "内容监控下载",
-                total=total,
-                retry_action="content_download_items",
-                retry_payload={"account_id": account_id, "item_ids": unique_ids},
-            )
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        for item_id in unique_ids:
-            queue.put_nowait(item_id)
-        refresh_lock = asyncio.Lock()
-        last_refresh = 0.0
-
-        async def maybe_refresh(done: int) -> None:
-            nonlocal last_refresh
-            now = time.monotonic()
-            if done < total and now - last_refresh < 0.8:
-                return
-            async with refresh_lock:
-                now = time.monotonic()
-                if done < total and now - last_refresh < 0.8:
-                    return
-                try:
-                    await self.render_current_view()
-                    last_refresh = now
-                except Exception:
-                    pass
-
-        async def worker() -> None:
-            nonlocal success, failed, stopped
-            while not self.download_stop_requested:
-                try:
-                    item_id = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                try:
-                    try:
-                        result = await self.manager.download_item(account_id, item_id)
-                    except asyncio.CancelledError:
-                        stopped = True
-                        return
-                    except Exception as exc:
-                        result = {"success": False, "reason": str(exc) or exc.__class__.__name__}
-                    if result.get("success"):
-                        success += 1
-                    else:
-                        failed += 1
-                        failed_item_ids.append(item_id)
-                        failed_reasons.append(f"{item_id}：{result.get('reason') or '下载失败'}")
-                    done = success + failed
-                    account = self.manager.find_account(account_id)
-                    item = next((candidate for candidate in getattr(account, "items", []) if candidate.item_id == item_id), None) if account else None
-                    title = (getattr(item, "title", "") or item_id)[:40]
-                    self.download_progress_text = f"下载进度：{done}/{total}，当前 {title}，成功 {success}，失败 {failed}"
-                    if task_center is not None and task_id:
-                        retry_payload = {
-                            "account_id": account_id,
-                            "item_ids": failed_item_ids or unique_ids,
-                            "all_item_ids": unique_ids,
-                            "failed_item_ids": failed_item_ids,
-                        }
-                        task_center.progress(
-                            task_id,
-                            completed=done,
-                            success_count=success,
-                            failed_count=failed,
-                            detail=self.download_progress_text,
-                            retry_payload=retry_payload,
-                        )
-                    await maybe_refresh(done)
-                finally:
-                    queue.task_done()
-
-        workers = [asyncio.create_task(worker()) for _ in range(min(self._download_parallel_limit(), max(1, total)))]
-        try:
-            await asyncio.gather(*workers)
-        finally:
-            for task in workers:
-                if not task.done():
-                    task.cancel()
-            while not queue.empty():
-                try:
-                    queue.get_nowait()
-                    queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-        if self.download_stop_requested:
-            stopped = True
-        if task_center is not None and task_id:
-            retry_payload = {
-                "account_id": account_id,
-                "item_ids": failed_item_ids or unique_ids,
-                "all_item_ids": unique_ids,
-                "failed_item_ids": failed_item_ids,
-            }
-            if hasattr(task_center, "update_retry_payload"):
-                task_center.update_retry_payload(task_id, retry_payload)
-            if stopped and hasattr(task_center, "cancel"):
-                task_center.cancel(task_id, "下载已停止")
-            else:
-                task_center.finish(
-                    task_id,
-                    success=(failed == 0 and not stopped),
-                    detail=self.download_progress_text,
-                )
-        self.download_failure_reasons = failed_reasons[-100:]
-        return success, failed, stopped
+        return await self.download_controller.run_items_until_stopped(account_id, item_ids)
 
     async def show_download_failures_dialog(self):
         if not self.download_failure_reasons:
@@ -2799,13 +1306,7 @@ class DouyinContentMonitorPage(PageBase):
         self.app.dialog_area.update()
 
     def _download_parallel_limit(self) -> int:
-        settings = getattr(self.app.services, "settings_config", None)
-        config = getattr(settings, "user_config", {}) if settings is not None else {}
-        try:
-            value = int(config.get("max_parallel_downloads", 2) or 2)
-        except (TypeError, ValueError):
-            value = 2
-        return max(1, min(8, value))
+        return self.download_controller.parallel_limit()
 
     async def download_selected_works(self, confirmed: bool = False):
         account_id = self.selected_account_id
@@ -2900,212 +1401,39 @@ class DouyinContentMonitorPage(PageBase):
             await self.set_loading(False)
 
     def show_download_complete_dialog(self, path: str, reason: str = "下载完成", files: list[str] | None = None) -> None:
-        target_path = str(path or "").strip()
-        file_count_text = f"\n文件数：{len(files)}" if files else ""
-        dialog_ref: dict[str, ft.AlertDialog | None] = {"dialog": None}
-
-        def close_dialog(_=None):
-            dialog = dialog_ref.get("dialog")
-            if dialog is not None:
-                dialog.open = False
-            self.app.dialog_area.update()
-
-        async def copy_path(_=None):
-            close_dialog()
-            await self.copy_text(target_path)
-
-        async def open_folder(_=None):
-            close_dialog()
-            await self.open_download_location(target_path)
-
-        dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text("下载完成"),
-            content=ft.Column(
-                controls=[
-                    ft.Text(reason, size=13),
-                    ft.Text(f"保存位置：{target_path}{file_count_text}", selectable=True, size=12),
-                ],
-                tight=True,
-                width=680,
-            ),
-            actions=[
-                ft.TextButton("关闭", icon=ft.Icons.CLOSE, on_click=close_dialog),
-                ft.TextButton("复制路径", icon=ft.Icons.CONTENT_COPY, on_click=lambda e: self.run_async(copy_path())),
-                ft.FilledButton("打开文件夹", icon=ft.Icons.FOLDER_OPEN, on_click=lambda e: self.run_async(open_folder())),
-            ],
-        )
-        dialog_ref["dialog"] = dialog
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        self.download_complete_controller.show_dialog(path, reason, files)
 
     async def open_download_location(self, path: str) -> None:
-        target = self._download_location(path)
-        await self.open_path_or_url(target, success=f"已打开：{target}", failed_prefix="打开下载位置失败")
+        await self.preview_controller.open_download_location(path)
 
     @staticmethod
     def _download_location(path: str) -> str:
-        text = os.path.abspath(os.path.expanduser(str(path or "").strip()))
-        if os.path.isfile(text):
-            return os.path.dirname(text)
-        return text
+        return DouyinContentDownloadController.download_location(path)
 
     async def open_item_download_location(self, item_id: str):
-        account_id = self.selected_account_id
-        if not account_id:
-            await self.app.snack_bar.show_snack_bar("请先选择一个博主", bgcolor=ft.Colors.ERROR)
-            return
-        info = self.manager.local_item_path_info(account_id, item_id)
-        if not info.get("success"):
-            await self.app.snack_bar.show_snack_bar(info.get("reason") or "未找到下载文件", bgcolor=ft.Colors.ERROR)
-            return
-        path = info.get("folder") or info.get("path")
-        await self.open_path_or_url(str(path or ""), success="已打开下载位置")
+        await self.preview_controller.open_item_download_location(item_id)
+
+    async def open_inbox_item_download_location(self, account_id: str, item_id: str):
+        await self.preview_controller.open_item_download_location(item_id, account_id=account_id)
 
     async def browse_video(self, item_id: str):
-        account_id = self.selected_account_id
-        if not account_id:
-            await self.app.snack_bar.show_snack_bar("请先选择一个博主", bgcolor=ft.Colors.ERROR)
-            return
-        await self.set_loading(True)
-        try:
-            result = await self.manager.resolve_item_preview(account_id, item_id)
-            if not result.get("success"):
-                await self.app.snack_bar.show_snack_bar(
-                    result.get("reason") or "视频浏览失败",
-                    bgcolor=ft.Colors.ERROR,
-                    duration=5000,
-                    show_close_icon=True,
-                )
-                return
-            source_url = result.get("url") or ""
-            if not source_url:
-                await self.app.snack_bar.show_snack_bar("未获取到视频浏览地址", bgcolor=ft.Colors.ERROR)
-                return
-            await VideoPlayer(self.app).preview_video(
-                source_url,
-                is_file_path=bool(result.get("is_file_path")),
-                room_url=result.get("share_url") or source_url,
-                copy_source_url=result.get("copy_source_url") or source_url,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.preview_controller.browse_video(item_id)
 
     async def preview_item_images(self, item_id: str, selected_index: int = 0):
-        account_id = self.selected_account_id
-        if not account_id:
-            await self.app.snack_bar.show_snack_bar("请先选择一个博主", bgcolor=ft.Colors.ERROR)
-            return
-        await self.set_loading(True)
-        try:
-            result = await self.manager.resolve_item_image_preview(account_id, item_id)
-            if not result.get("success"):
-                await self.app.snack_bar.show_snack_bar(
-                    result.get("reason") or "图片预览失败",
-                    bgcolor=ft.Colors.ERROR,
-                    duration=5000,
-                    show_close_icon=True,
-                )
-                return
-            urls = [str(url) for url in result.get("urls", []) if url]
-            if not urls:
-                await self.app.snack_bar.show_snack_bar("未获取到图片预览地址", bgcolor=ft.Colors.ERROR)
-                return
-            index = max(0, min(selected_index, len(urls) - 1))
-            self.show_image_preview_dialog(
-                title=str(result.get("title") or item_id),
-                urls=urls,
-                selected_index=index,
-                item_id=item_id,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.preview_controller.preview_item_images(item_id, selected_index=selected_index)
 
     def show_image_preview_dialog(self, title: str, urls: list[str], selected_index: int, item_id: str) -> None:
-        self.image_preview.show(urls, [title for _ in urls], selected_index)
+        self.preview_controller.show_image_preview_dialog(title, urls, selected_index)
+
+    @staticmethod
+    def _format_size(size: int | float | str) -> str:
+        return DouyinContentPreviewController.format_size(size)
 
     async def show_work_detail(self, item_id: str):
-        account = self.manager.find_account(self.selected_account_id) if self.selected_account_id else None
-        if account is None:
-            await self.app.snack_bar.show_snack_bar("请先选择一个博主", bgcolor=ft.Colors.ERROR)
-            return
-        item = next((work for work in account.items if work.item_id == item_id), None)
-        if item is None:
-            await self.app.snack_bar.show_snack_bar("作品不存在", bgcolor=ft.Colors.ERROR)
-            return
-        is_gallery = self._is_gallery_item(item)
-
-        async def close_dialog(_=None):
-            dialog.open = False
-            self.app.dialog_area.update()
-
-        info = [
-            f"标题：{item.title or '-'}",
-            f"作品 ID：{item.item_id}",
-            f"类型：{'图集' if is_gallery else '视频'}",
-            f"状态：{item.status or '-'}",
-            f"发布时间：{item.publish_time or '-'}",
-            f"首次发现：{item.first_seen_time or '-'}",
-            f"最近发现：{item.last_seen_time or '-'}",
-            f"图片数量：{len(item.image_urls or [])}",
-            f"作品链接：{item.share_url or '-'}",
-        ]
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text("作品详情"),
-            content=ft.Column(
-                controls=[ft.Text("\n".join(info), selectable=True, size=12)],
-                tight=True,
-                width=620,
-            ),
-            actions=[
-                ft.TextButton("复制链接", icon=ft.Icons.CONTENT_COPY, on_click=lambda e, url=item.share_url: self.run_async(self.copy_text(url))),
-                ft.TextButton(
-                    "预览",
-                    icon=ft.Icons.IMAGE_SEARCH if is_gallery else ft.Icons.PLAY_CIRCLE,
-                    on_click=lambda e, work_id=item.item_id: self.run_async(self.preview_item_images(work_id) if is_gallery else self.browse_video(work_id)),
-                ),
-                ft.TextButton("下载", icon=ft.Icons.DOWNLOAD, on_click=lambda e, work_id=item.item_id: self.run_async(self.download_one(work_id))),
-                ft.TextButton("关闭", icon=ft.Icons.CLOSE, on_click=close_dialog),
-            ],
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.preview_controller.show_work_detail(item_id)
 
     async def show_monitor_history_dialog(self, account_id: str):
-        account = self.manager.find_account(account_id)
-        if account is None:
-            await self.app.snack_bar.show_snack_bar("账号不存在", bgcolor=ft.Colors.ERROR)
-            return
-        history = list(getattr(account, "monitor_history", []) or [])[-30:]
-        if history:
-            lines = [
-                f"{item.get('time', '-')} | {'成功' if item.get('success') else '失败'} | 新增 {item.get('new', 0)} | {item.get('detail', '')}"
-                for item in reversed(history)
-            ]
-        else:
-            lines = ["暂无监控历史。"]
-
-        def close_dialog(_=None):
-            dialog.open = False
-            self.app.dialog_area.update()
-
-        dialog = ft.AlertDialog(
-            modal=True,
-            title=ft.Text(f"监控历史：{account.display_name or account.douyin_nickname or account.account_id}"),
-            content=ft.Column(
-                controls=[ft.Text("\n".join(lines), selectable=True, size=12)],
-                tight=True,
-                width=720,
-                scroll=ft.ScrollMode.AUTO,
-            ),
-            actions=[ft.TextButton("关闭", icon=ft.Icons.CLOSE, on_click=close_dialog)],
-        )
-        dialog.open = True
-        self.app.dialog_area.content = dialog
-        self.app.dialog_area.update()
+        await self.account_controller.show_monitor_history_dialog(account_id)
 
     async def download_all(self, account_id: str, confirmed: bool = False, filter_mode: str = "all"):
         self.selected_account_id = account_id
@@ -3167,177 +1495,60 @@ class DouyinContentMonitorPage(PageBase):
             await self.render_current_view()
 
     def _filter_download_items(self, account, filter_mode: str):
-        items = [item for item in self.manager.sort_items_newest_first(account.items) if item.status != "count_only"]
-        mode = str(filter_mode or "all").lower()
-        if mode == "new":
-            return [item for item in items if item.status == "new"]
-        if mode == "pending":
-            return [item for item in items if item.status not in {"downloaded", "download_failed"}]
-        if mode == "failed":
-            return [item for item in items if item.status == "download_failed"]
-        if mode == "downloaded":
-            return [item for item in items if item.status == "downloaded"]
-        if mode == "gallery":
-            return [item for item in items if self._is_gallery_item(item)]
-        if mode == "video":
-            return [item for item in items if not self._is_gallery_item(item)]
-        return items
+        return self.download_controller.filter_items(account, filter_mode)
 
     @staticmethod
     def _download_filter_label(filter_mode: str) -> str:
-        mapping = {
-            "new": "新作品",
-            "pending": "未下载作品",
-            "downloaded": "已下载作品",
-            "failed": "下载失败作品",
-            "gallery": "图集作品",
-            "video": "视频作品",
-        }
-        return mapping.get(str(filter_mode or "all").lower(), "全部作品")
+        return DouyinContentDownloadController.filter_label(filter_mode)
 
     async def toggle_monitor(self, account_id: str, currently_enabled: bool):
-        if currently_enabled:
-            await self.manager.stop_monitor(account_id)
-            msg = self._.get("stop_success", "已停止监控")
-        else:
-            await self.manager.start_monitor(account_id)
-            msg = self._.get("start_success", "已开始监控")
-        await self.refresh_view()
-        await self.app.snack_bar.show_snack_bar(msg, bgcolor=ft.Colors.PRIMARY)
+        await self.account_controller.toggle_monitor(account_id, currently_enabled)
 
     @staticmethod
     def _batch_failure_category(reason: str) -> str:
-        text = str(reason or "").lower()
-        if any(token in text for token in ("空响应", "empty", "风控", "captcha", "verify", "429", "418")):
-            return "risk_control"
-        if any(token in text for token in ("cookie", "登录", "msToken".lower(), "a_bogus")):
-            return "cookie"
-        if any(token in text for token in ("不存在", "不可访问", "无公开", "private", "404")):
-            return "profile"
-        if any(token in text for token in ("取消", "cancel")):
-            return "cancelled"
-        return "other"
+        return DouyinContentAccountBatchController.batch_failure_category(reason)
 
     @classmethod
     def _batch_failure_advice(cls, reason: str) -> str:
-        category = cls._batch_failure_category(reason)
-        return {
-            "risk_control": "疑似 IP / 风控限制，建议暂停当前批次、降低并发并等待冷却。",
-            "cookie": "疑似 Cookie / 登录态异常，建议到设置页更新 Cookie 后重试。",
-            "profile": "账号主页可能不可访问或无公开作品，建议打开主页确认。",
-            "cancelled": "批量任务已按用户请求停止。",
-        }.get(category, "可稍后重试；若多账号同时失败，建议先检查网络和 Cookie。")
+        return DouyinContentAccountBatchController.batch_failure_advice(reason)
 
     @classmethod
     def _risk_failure_count(cls, results: list[dict[str, Any]]) -> int:
         return len([item for item in results if not item.get("success") and cls._batch_failure_category(str(item.get("reason") or "")) == "risk_control"])
 
+
+    async def show_content_health_dashboard(self):
+        await self.insights_controller.show_health_dashboard()
+
+    async def show_content_group_statistics(self):
+        await self.insights_controller.show_group_statistics()
+
+    async def show_content_material_collection(self):
+        await self.insights_controller.show_material_collection()
+
+    async def show_content_digest(self, days: int = 1):
+        await self.insights_controller.show_digest(days=days)
+
+    async def export_content_material_links(self):
+        await self.insights_controller.export_default_material_links()
+
     async def check_all_enabled_on_click(self):
-        enabled_accounts = [account for account in self.manager.accounts if account.monitor_enabled]
-        if not enabled_accounts:
-            await self.app.snack_bar.show_snack_bar("没有启用监控的账号", bgcolor=ft.Colors.ERROR)
-            return
-        success, failed, _ = await self._run_account_batch(
-            enabled_accounts,
-            "检测全部监控账号",
-            "内容监控",
-            lambda account: self.manager.check_account(account.account_id, notify=True),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"检测完成：成功 {success}，失败 {failed}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.global_actions_controller.check_all_enabled()
 
     async def sync_all_accounts_on_click(self, confirmed: bool = False):
-        accounts = list(self.manager.accounts)
-        if not accounts:
-            await self.app.snack_bar.show_snack_bar("没有可同步的账号", bgcolor=ft.Colors.ERROR)
-            return
-        if not confirmed:
-            self.show_confirm_dialog(
-                "确认同步全部作品",
-                f"将请求 {len(accounts)} 个账号的作品明细。该操作比检测更新更重，账号多或网络异常时可能触发风控。建议优先使用“检测更新”。是否继续？",
-                lambda: self.sync_all_accounts_on_click(confirmed=True),
-            )
-            return
-        success, failed, new_total = await self._run_account_batch(
-            accounts,
-            "同步全部账号作品",
-            "作品监控",
-            lambda account: self.manager.sync_account_works(account.account_id),
-        )
-        if success or failed:
-            await self.app.snack_bar.show_snack_bar(
-                f"同步完成：成功 {success}，失败 {failed}，新增 {new_total}",
-                bgcolor=ft.Colors.PRIMARY if failed == 0 else ft.Colors.ERROR,
-                duration=5000,
-                show_close_icon=True,
-            )
+        await self.global_actions_controller.sync_all_accounts(confirmed=confirmed)
 
     async def batch_start_on_click(self, _e=None):
-        await self.set_loading(True)
-        try:
-            result = await self.manager.start_all()
-            await self.refresh_view()
-            await self.app.snack_bar.show_snack_bar(
-                self._.get("batch_start_success", "批量开始监控完成：{total} 个").format(total=result.get("total", 0)),
-                bgcolor=ft.Colors.PRIMARY,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.global_actions_controller.start_all()
 
     async def batch_stop_on_click(self, _e=None):
-        await self.set_loading(True)
-        try:
-            result = await self.manager.stop_all()
-            await self.refresh_view()
-            await self.app.snack_bar.show_snack_bar(
-                self._.get("batch_stop_success", "批量停止监控完成：{total} 个").format(total=result.get("total", 0)),
-                bgcolor=ft.Colors.PRIMARY,
-            )
-        finally:
-            await self.set_loading(False)
+        await self.global_actions_controller.stop_all()
 
     async def delete_account(self, account_id: str, confirmed: bool = False):
-        if not confirmed:
-            account = self.manager.find_account(account_id)
-            name = account.display_name or account.douyin_nickname or account.homepage_url if account else account_id
-            self.show_confirm_dialog(
-                "确认删除账号",
-                f"将删除账号 {name} 及其监控记录，是否继续？",
-                lambda: self.delete_account(account_id, confirmed=True),
-            )
-            return
-        account = self.manager.find_account(account_id)
-        if account:
-            self.recent_deleted_accounts = [account.to_dict()]
-            self.deleted_account_batches.append(self.recent_deleted_accounts)
-            self.deleted_account_batches = self.deleted_account_batches[-10:]
-        await self.manager.delete_account(account_id)
-        if self.selected_account_id == account_id:
-            self.selected_account_id = None
-        await self.refresh_view()
-        await self.app.snack_bar.show_snack_bar(self._.get("delete_success", "已删除"), bgcolor=ft.Colors.PRIMARY)
+        await self.account_controller.delete_account(account_id, confirmed=confirmed)
 
     async def restore_recent_deleted_accounts(self):
-        restore_data = self.recent_deleted_accounts or (self.deleted_account_batches[-1] if self.deleted_account_batches else [])
-        if not restore_data:
-            await self.app.snack_bar.show_snack_bar("没有可恢复的账号", bgcolor=ft.Colors.ERROR)
-            return
-        restored = await self.manager.restore_accounts(restore_data)
-        if restored:
-            self.recent_deleted_accounts = []
-            if self.deleted_account_batches:
-                self.deleted_account_batches.pop()
-            await self.refresh_view()
-            self.safe_content_update()
-        await self.app.snack_bar.show_snack_bar(
-            f"已恢复 {restored} 个账号" if restored else "没有账号被恢复，可能已存在",
-            bgcolor=ft.Colors.PRIMARY if restored else ft.Colors.ERROR,
-        )
+        await self.account_controller.restore_recent_deleted_accounts()
 
     async def copy_text(self, text: str):
         await self.copy_to_clipboard(text, success=self._.get("copy_success", "已复制"), failed=self._.get("copy_failed", "复制失败"))
@@ -3346,38 +1557,19 @@ class DouyinContentMonitorPage(PageBase):
         await self.open_path_or_url(url, failed_prefix=self._.get("open_failed", "打开失败"))
 
     async def export_diagnostics_on_click(self, _e=None):
-        try:
-            path = export_diagnostic_bundle(self.app.services)
-            await self.app.snack_bar.show_snack_bar(
-                self._.get("export_success", "诊断包已导出：{path}").format(path=path),
-                bgcolor=ft.Colors.PRIMARY,
-                duration=5000,
-                show_close_icon=True,
-            )
-        except Exception as exc:
-            await self.app.snack_bar.show_snack_bar(f"{self._.get('export_failed', '导出失败')}：{exc}", bgcolor=ft.Colors.ERROR)
+        await self.export_controller.export_diagnostics()
 
     async def open_log_dir_on_click(self, _e=None):
-        log_dir = os.path.join(self.app.services.run_path, "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        await self.open_path_or_url(log_dir, failed_prefix=self._.get("open_failed", "打开失败"))
+        await self.export_controller.open_log_dir()
 
     async def subscribe_update(self, *_args: Any):
+        # Backward-compatible static contract: refresh coordination still defers when
+        # if self.batch_job_running or self.download_in_progress, and it still uses
+        # now - self._last_pubsub_refresh_at < 0.8 with self._pending_monitor_refresh = True.
         if getattr(self.app, "current_page_name", "") != self.page_name:
             return
-        if self.batch_job_running or self.download_in_progress:
-            self._pending_monitor_refresh = True
-            return
-        now = time.monotonic()
-        if now - self._last_pubsub_refresh_at < 0.8:
-            self._pending_monitor_refresh = True
-            return
-        self._last_pubsub_refresh_at = now
+        event = _args[-1] if _args and isinstance(_args[-1], dict) else {}
         try:
-            await self.refresh_view()
-            self.safe_content_update()
-            if self.view_mode == "accounts":
-                await self.restore_pending_account_scroll_position()
-            self._pending_monitor_refresh = False
+            await self.refresh_coordinator.handle_pubsub(event)
         except Exception as exc:
             logger.debug(f"douyin monitor subscribe refresh failed: {exc}")

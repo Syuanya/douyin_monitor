@@ -19,9 +19,28 @@ class DouyinContentItem:
     first_seen_time: str = ""
     last_seen_time: str = ""
     status: str = "active"
+    download_path: str = ""
+    downloaded_at: str = ""
+    last_attempt_at: str = ""
+    failure_reason: str = ""
+    failure_category: str = ""
+    failure_next_step: str = ""
+    failure_retryable: bool = True
+    retry_count: int = 0
+    file_size: int = 0
+    source_confidence: str = ""
+    processed_at: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DouyinContentItem":
+        def as_int(value: Any, default: int = 0) -> int:
+            try:
+                if value is None or value == "":
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
         return cls(
             item_id=str(data.get("item_id") or data.get("aweme_id") or ""),
             title=str(data.get("title") or ""),
@@ -34,6 +53,17 @@ class DouyinContentItem:
             first_seen_time=str(data.get("first_seen_time") or ""),
             last_seen_time=str(data.get("last_seen_time") or ""),
             status=str(data.get("status") or "active"),
+            download_path=str(data.get("download_path") or data.get("local_path") or ""),
+            downloaded_at=str(data.get("downloaded_at") or ""),
+            last_attempt_at=str(data.get("last_attempt_at") or ""),
+            failure_reason=str(data.get("failure_reason") or data.get("last_error") or ""),
+            failure_category=str(data.get("failure_category") or ""),
+            failure_next_step=str(data.get("failure_next_step") or ""),
+            failure_retryable=bool(data.get("failure_retryable", True)),
+            retry_count=max(0, as_int(data.get("retry_count"), 0)),
+            file_size=max(0, as_int(data.get("file_size"), 0)),
+            source_confidence=str(data.get("source_confidence") or ""),
+            processed_at=str(data.get("processed_at") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -49,6 +79,17 @@ class DouyinContentItem:
             "first_seen_time": self.first_seen_time,
             "last_seen_time": self.last_seen_time,
             "status": self.status,
+            "download_path": self.download_path,
+            "downloaded_at": self.downloaded_at,
+            "last_attempt_at": self.last_attempt_at,
+            "failure_reason": self.failure_reason,
+            "failure_category": self.failure_category,
+            "failure_next_step": self.failure_next_step,
+            "failure_retryable": self.failure_retryable,
+            "retry_count": self.retry_count,
+            "file_size": self.file_size,
+            "source_confidence": self.source_confidence,
+            "processed_at": self.processed_at,
         }
 
 

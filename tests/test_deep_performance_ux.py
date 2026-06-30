@@ -46,12 +46,15 @@ def test_video_parse_resource_library_contract_in_ui() -> None:
 
 
 def test_content_monitor_has_error_repair_and_inbox_summary() -> None:
-    text = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+    view = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+    repair = (ROOT / "app/ui/views/douyin_content_error_repair_controller.py").read_text(encoding="utf-8")
+    inbox = (ROOT / "app/ui/views/douyin_content_inbox_controller.py").read_text(encoding="utf-8")
+    text = "\n".join([view, repair, inbox])
 
     assert "异常修复中心" in text
-    assert "open_error_repair_center" in text
+    assert "open_error_repair_center" in view
     assert "重新检测异常账号" in text
     assert "同步异常账号" in text
     assert "复制异常摘要" in text
-    assert "_inbox_summary_panel" in text
+    assert "summary_panel" in inbox
     assert "数量变化提示" in text

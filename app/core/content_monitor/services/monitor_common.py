@@ -23,6 +23,7 @@ from ...media.parser_models import ParsedVideoResult
 from ...media.resumable_download import download_http_file
 from ...parser import build_douyin_parser_backend
 from ...runtime.media_task_queue import current_media_task_id, report_media_task_progress
+from ...errors import classify_failure
 from ....utils.logger import logger
 from ..models import DouyinContentItem, DouyinMonitorAccount
 

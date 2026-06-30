@@ -193,6 +193,27 @@ class SQLiteStore:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
+    @staticmethod
+    def _chunks(values: list[str], size: int = 900) -> list[list[str]]:
+        clean = [str(value) for value in values if str(value or "")]
+        return [clean[index : index + size] for index in range(0, len(clean), max(1, int(size or 900)))]
+
+    def _delete_stale_monitor_accounts(self, conn: sqlite3.Connection, account_ids: list[str]) -> None:
+        keep = {str(account_id) for account_id in account_ids if str(account_id or "")}
+        rows = conn.execute("SELECT account_id FROM monitor_accounts").fetchall()
+        stale = [str(row["account_id"]) for row in rows if str(row["account_id"]) not in keep]
+        for chunk in self._chunks(stale):
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM monitor_accounts WHERE account_id IN ({placeholders})", chunk)
+
+    def _delete_stale_monitor_items(self, conn: sqlite3.Connection, account_id: str, item_ids: list[str]) -> None:
+        keep = {str(item_id) for item_id in item_ids if str(item_id or "")}
+        rows = conn.execute("SELECT item_id FROM monitor_items WHERE account_id = ?", (account_id,)).fetchall()
+        stale = [str(row["item_id"]) for row in rows if str(row["item_id"]) not in keep]
+        for chunk in self._chunks(stale):
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM monitor_items WHERE account_id = ? AND item_id IN ({placeholders})", [account_id, *chunk])
+
     def get_metadata(self, key: str, default: Any = None) -> str | Any:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM app_metadata WHERE key = ?", (key,)).fetchone()
@@ -240,22 +261,38 @@ class SQLiteStore:
             if not isinstance(account, dict):
                 continue
             account_id = str(account.get("account_id") or row["account_id"])
-            if account_id in items_by_account:
-                account["items"] = items_by_account[account_id]
+            account["items"] = items_by_account.get(account_id, account.get("items", []) if isinstance(account.get("items"), list) else [])
             accounts.append(account)
         return accounts
 
     def save_monitor_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        """Persist monitor accounts with incremental upserts.
+
+        Earlier versions deleted and reinserted every account and every work on
+        each save. That made large monitor lists stutter during batch checks and
+        downloads. This implementation updates current rows and only removes
+        stale accounts/items, while preserving the same public load/save shape.
+        """
         self.ensure_schema()
+        account_list = [account for account in accounts if isinstance(account, dict)]
+        account_ids = [str(account.get("account_id") or "").strip() for account in account_list]
+        account_ids = [account_id for account_id in account_ids if account_id]
         with self.connect() as conn:
-            conn.execute("DELETE FROM monitor_items")
-            conn.execute("DELETE FROM monitor_accounts")
-            for account in accounts:
-                if not isinstance(account, dict):
-                    continue
+            if account_ids:
+                self._delete_stale_monitor_accounts(conn, account_ids)
+            else:
+                conn.execute("DELETE FROM monitor_items")
+                conn.execute("DELETE FROM monitor_accounts")
+                return
+
+            for account in account_list:
                 account_id = str(account.get("account_id") or "").strip()
                 if not account_id:
                     continue
+                items = account.get("items", []) if isinstance(account.get("items"), list) else []
+                account_payload = dict(account)
+                # Keep account rows light; item payloads are stored in monitor_items.
+                account_payload["items"] = []
                 conn.execute(
                     """
                     INSERT INTO monitor_accounts(
@@ -263,6 +300,21 @@ class SQLiteStore:
                         monitor_enabled, last_check_time, updated_at, payload_json
                     )
                     VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                    ON CONFLICT(account_id) DO UPDATE SET
+                        homepage_url = excluded.homepage_url,
+                        display_name = excluded.display_name,
+                        group_name = excluded.group_name,
+                        monitor_enabled = excluded.monitor_enabled,
+                        last_check_time = excluded.last_check_time,
+                        updated_at = CURRENT_TIMESTAMP,
+                        payload_json = excluded.payload_json
+                    WHERE
+                        monitor_accounts.homepage_url != excluded.homepage_url OR
+                        monitor_accounts.display_name != excluded.display_name OR
+                        monitor_accounts.group_name != excluded.group_name OR
+                        monitor_accounts.monitor_enabled != excluded.monitor_enabled OR
+                        monitor_accounts.last_check_time != excluded.last_check_time OR
+                        monitor_accounts.payload_json != excluded.payload_json
                     """,
                     (
                         account_id,
@@ -271,22 +323,48 @@ class SQLiteStore:
                         str(account.get("group_name") or ""),
                         1 if bool(account.get("monitor_enabled")) else 0,
                         str(account.get("last_check_time") or ""),
-                        json.dumps(account, ensure_ascii=False),
+                        json.dumps(account_payload, ensure_ascii=False),
                     ),
                 )
-                for item in account.get("items", []) if isinstance(account.get("items"), list) else []:
+
+                item_ids: list[str] = []
+                valid_items: list[dict[str, Any]] = []
+                for item in items:
                     if not isinstance(item, dict):
                         continue
                     item_id = str(item.get("item_id") or "").strip()
                     if not item_id:
                         continue
+                    item_ids.append(item_id)
+                    valid_items.append(item)
+
+                self._delete_stale_monitor_items(conn, account_id, item_ids)
+
+                for item in valid_items:
+                    item_id = str(item.get("item_id") or "").strip()
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO monitor_items(
+                        INSERT INTO monitor_items(
                             account_id, item_id, title, media_type, status,
                             publish_time, first_seen_time, last_seen_time, payload_json
                         )
                         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(account_id, item_id) DO UPDATE SET
+                            title = excluded.title,
+                            media_type = excluded.media_type,
+                            status = excluded.status,
+                            publish_time = excluded.publish_time,
+                            first_seen_time = excluded.first_seen_time,
+                            last_seen_time = excluded.last_seen_time,
+                            payload_json = excluded.payload_json
+                        WHERE
+                            monitor_items.title != excluded.title OR
+                            monitor_items.media_type != excluded.media_type OR
+                            monitor_items.status != excluded.status OR
+                            monitor_items.publish_time != excluded.publish_time OR
+                            monitor_items.first_seen_time != excluded.first_seen_time OR
+                            monitor_items.last_seen_time != excluded.last_seen_time OR
+                            monitor_items.payload_json != excluded.payload_json
                         """,
                         (
                             account_id,

@@ -67,6 +67,14 @@ class DownloadItemsRequest(BaseModel):
     item_ids: list[str] = Field(default_factory=list)
 
 
+class MaterialExportRequest(BaseModel):
+    query: str = ""
+    status: str = "pending"
+    media_type: str = "all"
+    group_name: str = ""
+    limit: int = 1000
+
+
 class ItemPair(BaseModel):
     account_id: str
     item_id: str
@@ -316,7 +324,42 @@ def create_app(run_path: str | None = None) -> FastAPI:
                 "batch_jobs": rt.observability.batch_job_summary(),
                 "segmented_download": rt.observability.segmented_download_summary(),
             },
+            "content_monitor": rt.monitor.content_monitor_runtime_summary(),
         }
+
+
+    @app.get("/api/content-monitor/health", dependencies=[auth])
+    async def content_monitor_health(rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.content_monitor_health()
+
+    @app.get("/api/content-monitor/groups", dependencies=[auth])
+    async def content_monitor_groups(rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.content_monitor_groups()
+
+    @app.get("/api/content-monitor/materials", dependencies=[auth])
+    async def content_monitor_materials(
+        q: str = "",
+        status: str = "pending",
+        media_type: str = "all",
+        group_name: str = "",
+        limit: int = 200,
+        rt: WebRuntime = Depends(runtime),
+    ) -> dict[str, Any]:
+        return rt.content_monitor_materials(query=q, status=status, media_type=media_type, group_name=group_name, limit=limit)
+
+    @app.get("/api/content-monitor/digest", dependencies=[auth])
+    async def content_monitor_digest(days: int = 1, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.content_monitor_digest(days=days)
+
+    @app.post("/api/content-monitor/materials/export", dependencies=[auth])
+    async def export_content_monitor_materials(payload: MaterialExportRequest, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
+        return rt.export_content_monitor_materials(
+            query=payload.query,
+            status=payload.status,
+            media_type=payload.media_type,
+            group_name=payload.group_name,
+            limit=payload.limit,
+        )
 
     @app.get("/api/accounts", dependencies=[auth])
     async def list_accounts(include_items: bool = False, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
@@ -635,7 +678,7 @@ def create_app(run_path: str | None = None) -> FastAPI:
 
     @app.post("/api/tasks/{task_id}/cancel", dependencies=[auth])
     async def task_cancel(task_id: str, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:
-        return rt.cancel_task_record(task_id)
+        return await rt.cancel_task_record(task_id)
 
     @app.post("/api/tasks/{task_id}/retry", dependencies=[auth])
     async def task_retry(task_id: str, rt: WebRuntime = Depends(runtime)) -> dict[str, Any]:

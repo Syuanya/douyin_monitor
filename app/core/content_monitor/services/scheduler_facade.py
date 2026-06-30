@@ -24,12 +24,13 @@ class ContentMonitorSchedulerMixin:
         self.services.broadcast_pubsub("douyin_monitor_update", {"event": "status", "account_id": account_id})
         return True
 
-    @classmethod
-    def is_periodic_task_running(cls) -> bool:
-        return False
+    def is_periodic_task_running(self) -> bool:
+        task = getattr(self, "_periodic_task", None) or getattr(getattr(self, "_scheduler", None), "task", None)
+        return bool(task is not None and not task.done())
 
-    @classmethod
-    def set_periodic_task_running(cls, value: bool = True) -> None:
+    def set_periodic_task_running(self, value: bool = True) -> None:
+        # Backward-compatible no-op. Use setup_periodic_check/stop_periodic_check
+        # because starting or stopping the scheduler is asynchronous.
         return None
 
     async def setup_periodic_check(self) -> None:
@@ -42,6 +43,6 @@ class ContentMonitorSchedulerMixin:
         await self.check_due_enabled()
 
     async def stop_periodic_check(self) -> None:
-        task = self._periodic_task
         self._periodic_task = None
         await self._scheduler.stop()
+        await self.flush_persist()

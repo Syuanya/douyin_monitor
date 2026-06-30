@@ -109,3 +109,38 @@ class AccountRepositoryTest(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertEqual(store.monitor_account_count(), 1)
             self.assertEqual(repo.load_accounts(lambda item: item)[0]["account_id"], "a3")
+    def test_sqlite_monitor_account_save_removes_stale_accounts_and_items_incrementally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "config" / "douyin_content_monitor.json"
+            path.parent.mkdir()
+            store = SQLiteStore(str(root))
+            repo = AccountRepository(str(path), sqlite_store=store, mirror_json=False)
+
+            repo.save_accounts(
+                [
+                    {
+                        "account_id": "a1",
+                        "homepage_url": "https://www.douyin.com/user/a1",
+                        "items": [{"item_id": "old", "title": "old"}, {"item_id": "keep", "title": "keep"}],
+                    },
+                    {"account_id": "stale", "homepage_url": "https://www.douyin.com/user/stale", "items": []},
+                ]
+            )
+            repo.save_accounts(
+                [
+                    {
+                        "account_id": "a1",
+                        "homepage_url": "https://www.douyin.com/user/a1",
+                        "display_name": "updated",
+                        "items": [{"item_id": "keep", "title": "updated"}, {"item_id": "new", "title": "new"}],
+                    }
+                ]
+            )
+
+            loaded = store.load_monitor_accounts()
+            self.assertEqual([account["account_id"] for account in loaded], ["a1"])
+            self.assertEqual(loaded[0]["display_name"], "updated")
+            self.assertEqual({item["item_id"] for item in loaded[0]["items"]}, {"keep", "new"})
+            self.assertEqual(next(item for item in loaded[0]["items"] if item["item_id"] == "keep")["title"], "updated")
+

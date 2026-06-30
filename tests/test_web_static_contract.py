@@ -62,3 +62,15 @@ def test_web_admin_pages_are_registered():
 def test_web_pwa_files_exist():
     assert (ROOT / "app/web/static/manifest.webmanifest").exists()
     assert (ROOT / "app/web/static/sw.js").exists()
+
+
+def test_web_inbox_keeps_download_failed_items_actionable():
+    context = (ROOT / "app/web/context.py").read_text(encoding="utf-8")
+    serializers = (ROOT / "app/web/serializers.py").read_text(encoding="utf-8")
+    js = (ROOT / "app/web/static/app.js").read_text(encoding="utf-8")
+
+    assert "is_pending_new_work_item(item)" in context
+    assert "is_pending_new_work_item(item)" in serializers
+    assert "item.status === 'download_failed' ? '下载失败'" in js
+    assert "item.status === 'download_failed' ? '重试下载'" in js
+    assert "失败原因" in js

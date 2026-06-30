@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from app.core.content_monitor.status_rules import is_pending_new_work_item
+
 
 def safe_dict(value: Any) -> dict[str, Any]:
     if value is None:
@@ -30,7 +32,7 @@ def safe_dict(value: Any) -> dict[str, Any]:
 def account_to_dict(account: Any, *, include_items: bool = False) -> dict[str, Any]:
     data = safe_dict(account)
     items = list(data.get("items") or [])
-    new_count = len([item for item in items if str(item.get("status") or "") in {"new", "count_only"}])
+    new_count = len([item for item in items if is_pending_new_work_item(item)])
     data["new_unhandled_count"] = new_count
     data["item_count"] = len(items)
     if not include_items:

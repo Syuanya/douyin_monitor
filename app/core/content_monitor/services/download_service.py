@@ -4,6 +4,53 @@ from .monitor_common import *
 
 
 class ContentMonitorDownloadMixin:
+    @staticmethod
+    def _download_timestamp() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _safe_file_size(path: str) -> int:
+        try:
+            return os.path.getsize(path) if path and os.path.isfile(path) else 0
+        except OSError:
+            return 0
+
+    def _mark_download_attempt(self, item: DouyinContentItem) -> None:
+        item.last_attempt_at = self._download_timestamp()
+        item.processed_at = item.last_attempt_at
+        item.failure_reason = ""
+        item.failure_category = ""
+        item.failure_next_step = ""
+        item.failure_retryable = True
+
+    def _mark_download_success(self, item: DouyinContentItem, path: str = "") -> None:
+        now = self._download_timestamp()
+        item.status = "downloaded"
+        item.download_path = str(path or item.download_path or "")
+        item.downloaded_at = now
+        item.last_attempt_at = item.last_attempt_at or now
+        item.processed_at = now
+        item.failure_reason = ""
+        item.failure_category = ""
+        item.failure_next_step = ""
+        item.failure_retryable = True
+        item.file_size = self._safe_file_size(item.download_path)
+
+    def _mark_download_failure(self, item: DouyinContentItem, reason: Any) -> None:
+        now = self._download_timestamp()
+        item.status = "download_failed"
+        item.last_attempt_at = item.last_attempt_at or now
+        item.processed_at = now
+        item.failure_reason = str(reason or "下载失败")
+        advice = classify_failure(item.failure_reason)
+        item.failure_category = advice.category
+        item.failure_next_step = advice.next_step
+        item.failure_retryable = bool(advice.retryable)
+        try:
+            item.retry_count = max(0, int(getattr(item, "retry_count", 0) or 0)) + 1
+        except (TypeError, ValueError):
+            item.retry_count = 1
+
     def _content_download_dir(self, account: DouyinMonitorAccount) -> str:
         base = str(self.settings.user_config.get("douyin_content_download_path") or "").strip()
         if not base:
@@ -85,15 +132,19 @@ class ContentMonitorDownloadMixin:
         item = next((candidate for candidate in account.items if candidate.item_id == item_id), None)
         if not item:
             return {"success": False, "reason": "作品不存在"}
+        stored_path = str(getattr(item, "download_path", "") or "").strip()
         if self._is_gallery_item(item):
-            folder = os.path.join(self._content_download_dir(account), self._media_filename(account, item))
+            folder = stored_path if stored_path and os.path.isdir(stored_path) else os.path.join(self._content_download_dir(account), self._media_filename(account, item))
             if os.path.isdir(folder):
                 files = [str(path) for path in sorted(Path(folder).glob("*")) if path.is_file()]
                 if files:
                     return {"success": True, "kind": "folder", "path": folder, "files": files}
             return {"success": False, "reason": "未找到已下载图集文件夹"}
+        if stored_path and os.path.isfile(stored_path) and os.path.getsize(stored_path) > 0:
+            return {"success": True, "kind": "file", "path": stored_path, "folder": os.path.dirname(stored_path)}
         path = self._existing_downloaded_video_path(account, item)
         if path:
+            self._mark_download_success(item, path)
             return {"success": True, "kind": "file", "path": path, "folder": os.path.dirname(path)}
         return {"success": False, "reason": "未找到已下载视频文件"}
 
@@ -135,42 +186,117 @@ class ContentMonitorDownloadMixin:
         item_ids = [item.item_id for item in new_items if self._auto_download_matches(policy, item)]
         if not item_ids:
             return
+        task_key = f"{account.account_id}:{','.join(item_ids)}"
+        task_registry = getattr(self, "_auto_download_tasks", None)
+        if isinstance(task_registry, dict):
+            existing = task_registry.get(task_key)
+            if existing is not None and not existing.done():
+                logger.debug(f"Auto download already running: {task_key}")
+                return
 
         async def run_auto_download() -> None:
             success = 0
             failed = 0
+            failed_item_ids: list[str] = []
             task_center = getattr(self.services, "task_center", None)
+            cancel_payload = {"account_id": account.account_id, "item_ids": item_ids, "task_key": task_key}
             task_id = (
                 task_center.start(
                     f"自动下载：{account.display_name or account.douyin_nickname or account.account_id}",
                     "自动下载",
                     total=len(item_ids),
                     retry_action="content_download_items",
-                    retry_payload={"account_id": account.account_id, "item_ids": item_ids},
+                    retry_payload={"account_id": account.account_id, "item_ids": item_ids, "all_item_ids": item_ids, "retryable_only": True},
+                    cancel_action="content_auto_download",
+                    cancel_payload=cancel_payload,
                 )
                 if task_center
                 else None
             )
-            for index, item_id in enumerate(item_ids, start=1):
-                result = await self.download_item(account.account_id, item_id, priority="background")
-                if result.get("success"):
-                    success += 1
-                else:
-                    failed += 1
+            meta_registry = getattr(self, "_auto_download_task_meta", None)
+            if isinstance(meta_registry, dict):
+                meta_registry[task_key] = {
+                    "task_key": task_key,
+                    "task_id": task_id or "",
+                    "account_id": account.account_id,
+                    "account_name": account.display_name or account.douyin_nickname or account.account_id,
+                    "item_ids": list(item_ids),
+                    "total": len(item_ids),
+                    "success_count": 0,
+                    "failed_count": 0,
+                    "started_at": self._download_timestamp(),
+                }
+            try:
+                for index, item_id in enumerate(item_ids, start=1):
+                    try:
+                        result = await self.download_item(account.account_id, item_id, priority="background")
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.debug(f"Auto download item failed: account={account.account_id}, item={item_id}, error={exc}")
+                        result = {"success": False, "reason": str(exc) or exc.__class__.__name__}
+                    if result.get("success"):
+                        success += 1
+                    else:
+                        failed += 1
+                        failed_item_ids.append(item_id)
+                    if isinstance(getattr(self, "_auto_download_task_meta", None), dict) and task_key in self._auto_download_task_meta:
+                        self._auto_download_task_meta[task_key].update(
+                            {
+                                "completed": index,
+                                "success_count": success,
+                                "failed_count": failed,
+                                "failed_item_ids": list(failed_item_ids),
+                                "updated_at": self._download_timestamp(),
+                            }
+                        )
+                    if task_center and task_id:
+                        task_center.progress(
+                            task_id,
+                            completed=index,
+                            success_count=success,
+                            failed_count=failed,
+                            detail=f"自动下载进度：{index}/{len(item_ids)}，成功 {success}，失败 {failed}",
+                            retry_payload={
+                                "account_id": account.account_id,
+                                "item_ids": failed_item_ids or item_ids,
+                                "all_item_ids": item_ids,
+                                "failed_item_ids": failed_item_ids,
+                                "retryable_only": True,
+                            },
+                            cancel_payload=cancel_payload,
+                        )
                 if task_center and task_id:
-                    task_center.progress(
-                        task_id,
-                        completed=index,
-                        success_count=success,
-                        failed_count=failed,
-                        detail=f"自动下载进度：{index}/{len(item_ids)}，成功 {success}，失败 {failed}",
-                    )
-            if task_center and task_id:
-                task_center.finish(task_id, success=failed == 0, detail=f"自动下载完成：成功 {success}，失败 {failed}")
-            self.services.broadcast_pubsub("douyin_monitor_update", {"event": "auto_download", "account_id": account.account_id})
+                    task_center.finish(task_id, success=failed == 0, detail=f"自动下载完成：成功 {success}，失败 {failed}")
+            except asyncio.CancelledError:
+                if task_center and task_id and hasattr(task_center, "cancel"):
+                    task_center.cancel(task_id, f"自动下载已取消：成功 {success}，失败 {failed}")
+                raise
+            except Exception as exc:
+                if task_center and task_id:
+                    task_center.finish(task_id, success=False, detail=f"自动下载异常：{exc}")
+                logger.debug(f"Auto download task failed: account={account.account_id}, error={exc}")
+            finally:
+                self.services.broadcast_pubsub("douyin_monitor_update", {"event": "auto_download_finished", "account_id": account.account_id, "force": True})
+
+        def cleanup(task: asyncio.Task) -> None:
+            if isinstance(task_registry, dict):
+                task_registry.pop(task_key, None)
+            meta_registry = getattr(self, "_auto_download_task_meta", None)
+            if isinstance(meta_registry, dict):
+                meta_registry.pop(task_key, None)
+            if task.cancelled():
+                return
+            try:
+                task.exception()
+            except Exception as exc:
+                logger.debug(f"Auto download cleanup observed exception: {exc}")
 
         try:
-            asyncio.create_task(run_auto_download())
+            task = asyncio.create_task(run_auto_download())
+            if isinstance(task_registry, dict):
+                task_registry[task_key] = task
+            task.add_done_callback(cleanup)
         except RuntimeError:
             logger.debug("Auto download skipped: no running event loop")
 
@@ -197,7 +323,7 @@ class ContentMonitorDownloadMixin:
 
         existing_path = self._existing_downloaded_video_path(account, item)
         if existing_path:
-            item.status = "downloaded"
+            self._mark_download_success(item, existing_path)
             self._refresh_account_new_count(account)
             await self.persist()
             return {"success": True, "reason": "文件已存在", "path": existing_path}
@@ -210,15 +336,21 @@ class ContentMonitorDownloadMixin:
                 await self.persist()
             elif should_refresh_video_url:
                 item.download_url = ""
-                item.status = "download_failed"
+                reason = "解析器未返回可下载视频，作品可能已下架、不可见或被接口过滤"
+                self._mark_download_failure(item, reason)
                 self._refresh_account_new_count(account)
                 await self.persist()
-                return {"success": False, "reason": "解析器未返回可下载视频，作品可能已下架、不可见或被接口过滤"}
+                return {"success": False, "reason": reason}
         if not item.download_url:
-            return {"success": False, "reason": "未获取到下载地址，请检查解析器配置"}
+            reason = "未获取到下载地址，请检查解析器配置"
+            self._mark_download_failure(item, reason)
+            self._refresh_account_new_count(account)
+            await self.persist()
+            return {"success": False, "reason": reason}
 
         save_path = self._video_save_path(account, item)
         task_label = item.title or item.item_id
+        self._mark_download_attempt(item)
 
         async def run_download():
             await self._download_file(item.download_url, save_path)
@@ -251,16 +383,18 @@ class ContentMonitorDownloadMixin:
                         dedupe_key=save_path,
                     )
                 except Exception as retry_exc:
-                    item.status = "download_failed"
+                    reason = f"下载失败：{retry_exc}"
+                    self._mark_download_failure(item, reason)
                     self._refresh_account_new_count(account)
                     await self.persist()
-                    return {"success": False, "reason": f"下载失败：{retry_exc}"}
+                    return {"success": False, "reason": reason}
             else:
-                item.status = "download_failed"
+                reason = f"下载失败：{exc}"
+                self._mark_download_failure(item, reason)
                 self._refresh_account_new_count(account)
                 await self.persist()
-                return {"success": False, "reason": f"下载失败：{exc}"}
-        item.status = "downloaded"
+                return {"success": False, "reason": reason}
+        self._mark_download_success(item, path)
         self._refresh_account_new_count(account)
         await self.persist()
         return {"success": True, "reason": "下载完成", "path": path}
@@ -277,7 +411,7 @@ class ContentMonitorDownloadMixin:
 
         existing_path = self._existing_downloaded_video_path(account, item)
         if existing_path:
-            item.status = "downloaded"
+            self._mark_download_success(item, existing_path)
             await self.persist()
             return {
                 "success": True,
@@ -375,6 +509,7 @@ class ContentMonitorDownloadMixin:
         return hostname.endswith("douyinvod.com")
 
     async def _download_gallery_with_parsed_downloader(self, account: DouyinMonitorAccount, item: DouyinContentItem, priority: str = "foreground") -> dict[str, Any]:
+        self._mark_download_attempt(item)
         item.image_urls = deduplicate_image_urls(item.image_urls)
         if not item.image_urls:
             resolved = await self._resolve_item_download_item(item)
@@ -383,10 +518,11 @@ class ContentMonitorDownloadMixin:
                 await self.persist()
 
         if not item.image_urls:
-            item.status = "download_failed"
+            reason = "未获取到图集图片地址，请检查解析器配置"
+            self._mark_download_failure(item, reason)
             self._refresh_account_new_count(account)
             await self.persist()
-            return {"success": False, "reason": "未获取到图集图片地址，请检查解析器配置"}
+            return {"success": False, "reason": reason}
 
         item.image_urls = deduplicate_image_urls(item.image_urls)
         parsed_item = self._to_parsed_media_result(account, item, priority=priority)
@@ -401,17 +537,22 @@ class ContentMonitorDownloadMixin:
                 try:
                     result = await self.services.parsed_media_downloader.download(parsed_item)
                 except Exception as retry_exc:
-                    item.status = "download_failed"
+                    reason = f"图集下载失败：{retry_exc}"
+                    self._mark_download_failure(item, reason)
                     self._refresh_account_new_count(account)
                     await self.persist()
-                    return {"success": False, "reason": f"图集下载失败：{retry_exc}"}
+                    return {"success": False, "reason": reason}
             else:
-                item.status = "download_failed"
+                reason = f"图集下载失败：{exc}"
+                self._mark_download_failure(item, reason)
                 self._refresh_account_new_count(account)
                 await self.persist()
-                return {"success": False, "reason": f"图集下载失败：{exc}"}
+                return {"success": False, "reason": reason}
 
-        item.status = "downloaded" if result.get("success") else "download_failed"
+        if result.get("success"):
+            self._mark_download_success(item, str(result.get("path") or ""))
+        else:
+            self._mark_download_failure(item, result.get("reason") or "图集下载失败")
         self._refresh_account_new_count(account)
         await self.persist()
         return result
@@ -475,13 +616,17 @@ class ContentMonitorDownloadMixin:
         task_center = getattr(self.services, "task_center", None)
         task_id = ""
         if task_center is not None:
+            cancel_action = "batch_job" if batch_job is not None and getattr(batch_job, "job_id", "") else ""
+            cancel_payload = {"job_id": getattr(batch_job, "job_id", "")} if cancel_action else {}
             task_id = task_center.start(
                 f"{title_prefix}：{name}",
                 "内容监控下载",
                 detail=f"准备批量下载 {total} 个作品" + ("（恢复未完成批次）" if already_completed else ""),
                 total=total,
                 retry_action="content_download_items",
-                retry_payload={"account_id": account_id, "item_ids": unique_ids},
+                retry_payload={"account_id": account_id, "item_ids": unique_ids, "all_item_ids": unique_ids, "retryable_only": True},
+                cancel_action=cancel_action,
+                cancel_payload=cancel_payload,
             )
 
         limit = self._batch_download_concurrency()
@@ -536,7 +681,14 @@ class ContentMonitorDownloadMixin:
                                 success_count=success_count,
                                 failed_count=failed_count,
                                 detail=f"批量下载进度：{done}/{total}，成功 {success_count}，失败 {failed_count}",
-                                retry_payload={"account_id": account_id, "item_ids": failed_item_ids or unique_ids, "failed_item_ids": failed_item_ids},
+                                retry_payload={
+                                    "account_id": account_id,
+                                    "item_ids": failed_item_ids or unique_ids,
+                                    "all_item_ids": unique_ids,
+                                    "failed_item_ids": failed_item_ids,
+                                    "retryable_only": True,
+                                },
+                                cancel_payload={"job_id": getattr(batch_job, "job_id", "")} if batch_job is not None and getattr(batch_job, "job_id", "") else {},
                             )
                 finally:
                     queue.task_done()
@@ -566,7 +718,16 @@ class ContentMonitorDownloadMixin:
                 batch_store.finish(batch_job.job_id, success=(failed_count == 0))
         if task_center is not None and task_id:
             if hasattr(task_center, "update_retry_payload"):
-                task_center.update_retry_payload(task_id, {"account_id": account_id, "item_ids": failed_item_ids or unique_ids, "failed_item_ids": failed_item_ids})
+                task_center.update_retry_payload(
+                    task_id,
+                    {
+                        "account_id": account_id,
+                        "item_ids": failed_item_ids or unique_ids,
+                        "all_item_ids": unique_ids,
+                        "failed_item_ids": failed_item_ids,
+                        "retryable_only": True,
+                    },
+                )
             if stopped_status == "paused" and hasattr(task_center, "cancel"):
                 task_center.cancel(task_id, f"批量下载已暂停：成功 {success_count}，失败 {failed_count}，剩余进度已保存")
             elif stopped_status == "cancelled" and hasattr(task_center, "cancel"):
@@ -584,6 +745,58 @@ class ContentMonitorDownloadMixin:
             "failed_item_ids": failed_item_ids,
         }
 
+
+    def download_status_summary(self, account_id: str) -> dict[str, Any]:
+        account = self.find_account(account_id)
+        if not account:
+            return {"success": False, "reason": "账号不存在"}
+        items = [item for item in getattr(account, "items", []) if str(getattr(item, "status", "") or "") != "count_only"]
+        downloaded = [item for item in items if str(getattr(item, "status", "") or "") == "downloaded"]
+        failed = [item for item in items if str(getattr(item, "status", "") or "") == "download_failed"]
+        new_items = [item for item in items if str(getattr(item, "status", "") or "") == "new"]
+        pending = [item for item in items if str(getattr(item, "status", "") or "") not in {"downloaded", "download_failed"}]
+        failure_categories: dict[str, int] = {}
+        for item in failed:
+            category = str(getattr(item, "failure_category", "") or "未分类")
+            failure_categories[category] = failure_categories.get(category, 0) + 1
+        retryable_failed = len([item for item in failed if bool(getattr(item, "failure_retryable", True))])
+        return {
+            "success": True,
+            "total": len(items),
+            "downloaded": len(downloaded),
+            "failed": len(failed),
+            "new": len(new_items),
+            "pending": len(pending),
+            "failed_item_ids": [item.item_id for item in failed],
+            "latest_failure_reason": str(getattr(failed[0], "failure_reason", "") or "") if failed else "",
+            "latest_failure_category": str(getattr(failed[0], "failure_category", "") or "") if failed else "",
+            "latest_failure_next_step": str(getattr(failed[0], "failure_next_step", "") or "") if failed else "",
+            "failure_categories": failure_categories,
+            "retryable_failed": retryable_failed,
+            "non_retryable_failed": max(0, len(failed) - retryable_failed),
+        }
+
+    async def retry_failed_downloads(self, account_id: str, *, retryable_only: bool = True) -> dict[str, Any]:
+        account = self.find_account(account_id)
+        if not account:
+            return {"success": False, "reason": "账号不存在", "total": 0, "success_count": 0, "failed_count": 0}
+        failed_items = [
+            item
+            for item in self.sort_items_newest_first(list(getattr(account, "items", []) or []))
+            if str(getattr(item, "status", "") or "") == "download_failed" and item.item_id
+        ]
+        retry_items = [item for item in failed_items if (not retryable_only or bool(getattr(item, "failure_retryable", True)))]
+        skipped = len(failed_items) - len(retry_items)
+        failed_ids = [item.item_id for item in retry_items]
+        if not failed_ids:
+            reason = "没有可重试的下载失败作品" if skipped else "没有下载失败作品需要重试"
+            return {"success": True, "reason": reason, "total": 0, "success_count": 0, "failed_count": 0, "skipped_count": skipped}
+        result = await self.download_items_batch(account_id, failed_ids, title_prefix="失败作品重试")
+        result["skipped_count"] = skipped
+        if skipped:
+            result["reason"] = f"{result.get('reason') or '重试完成'}；跳过不可重试 {skipped} 个"
+        return result
+
     async def mark_items_seen_batch(self, account_item_pairs: list[tuple[str, str]]) -> dict[str, Any]:
         changed = 0
         touched: set[str] = set()
@@ -599,8 +812,9 @@ class ContentMonitorDownloadMixin:
                     account.items = [candidate for candidate in getattr(account, "items", []) if candidate.item_id != item_id]
                     changed += 1
                     touched.add(account.account_id)
-                elif str(getattr(item, "status", "")) == "new":
+                elif str(getattr(item, "status", "")) in {"new", "download_failed"}:
                     item.status = "active"
+                    item.processed_at = self._download_timestamp()
                     changed += 1
                     touched.add(account.account_id)
             for account in self._accounts:

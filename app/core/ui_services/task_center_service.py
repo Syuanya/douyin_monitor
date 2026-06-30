@@ -41,6 +41,7 @@ class TaskCenterFacadeService:
             "cancelled": len([status for status in status_keys if status == OperationStatus.CANCELLED.value]),
             "completed": len([status for status in status_keys if status == OperationStatus.COMPLETED.value]),
             "retryable": len([record for record in records if task_status_key(record.get("status_key") or record.get("status")) == OperationStatus.FAILED.value and record.get("retry_action")]),
+            "cancelable": len([record for record in records if record.get("is_active") and record.get("cancel_action")]),
         }
 
     @staticmethod
@@ -236,16 +237,61 @@ class TaskCenterFacadeService:
                 break
         return related[: max(1, int(limit or 50))]
 
+
+    async def cancel_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        action = str(record.get("cancel_action") or "")
+        payload = record.get("cancel_payload") if isinstance(record.get("cancel_payload"), dict) else {}
+        result: dict[str, Any]
+        if action == "content_auto_download":
+            manager = getattr(self.app.services, "douyin_content_monitor", None)
+            if manager is None or not hasattr(manager, "cancel_auto_downloads"):
+                return {"success": False, "reason": "内容监控自动下载服务不可用"}
+            result = await manager.cancel_auto_downloads(
+                str(payload.get("account_id") or ""),
+                item_ids=[str(item) for item in payload.get("item_ids", []) if item],
+                task_key=str(payload.get("task_key") or ""),
+            )
+            if int(result.get("cancelled") or 0) <= 0:
+                return {"success": False, "reason": "未找到正在运行的自动下载任务", **result}
+            result = {"success": True, "reason": f"已取消自动下载 {result.get('cancelled')} 个", **result}
+        elif action == "batch_job":
+            job_id = str(payload.get("job_id") or "")
+            if not job_id:
+                return {"success": False, "reason": "缺少批量任务 ID"}
+            result = await self.cancel_batch_job(job_id)
+        else:
+            return {"success": False, "reason": "当前任务不支持从任务中心取消"}
+        self._broadcast_content_monitor_update("task_cancelled", payload)
+        return result
+
     async def retry_record(self, record: dict[str, Any]) -> dict[str, Any]:
         action = str(record.get("retry_action") or "")
         payload = record.get("retry_payload") if isinstance(record.get("retry_payload"), dict) else {}
         if action == "content_download_items":
-            return await self.retry_content_download_items(payload)
+            result = await self.retry_content_download_items(payload)
+            self._broadcast_content_monitor_update("task_retry", payload)
+            return result
         if action == "download_recover_all":
             return await self.retry_download_recovery(payload)
         if action == "download_recover_one":
             return await self.retry_download_recovery(payload)
         return {"success": False, "reason": "当前任务不支持自动重试"}
+
+
+    def _broadcast_content_monitor_update(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        services = getattr(self.app, "services", None)
+        broadcaster = getattr(services, "broadcast_pubsub", None)
+        if not callable(broadcaster):
+            return
+        data = {"event": event, "force": True}
+        if isinstance(payload, dict):
+            for key in ("account_id", "item_ids", "failed_item_ids", "task_key", "job_id"):
+                if key in payload:
+                    data[key] = payload.get(key)
+        try:
+            broadcaster("douyin_monitor_update", data)
+        except Exception:
+            pass
 
     async def retry_all_failed(self, delay_seconds: float = 0.1) -> dict[str, int]:
         retryable = [record for record in self.records(500) if record.get("status") == TASK_STATUS_FAILED and record.get("retry_action")]
@@ -330,7 +376,19 @@ class TaskCenterFacadeService:
         if account is None:
             return {"success": False, "reason": "重试账号不存在"}
         name = account.display_name or account.douyin_nickname or account.account_id
-        unique_ids = list(dict.fromkeys(item_ids))
+        requested_ids = list(dict.fromkeys(item_ids))
+        retryable_only = bool(payload.get("retryable_only", True))
+        item_by_id = {str(getattr(item, "item_id", "") or ""): item for item in getattr(account, "items", []) or []}
+        skipped_ids: list[str] = []
+        unique_ids: list[str] = []
+        for item_id in requested_ids:
+            item = item_by_id.get(item_id)
+            if retryable_only and item is not None and str(getattr(item, "status", "") or "") == "download_failed" and not bool(getattr(item, "failure_retryable", True)):
+                skipped_ids.append(item_id)
+                continue
+            unique_ids.append(item_id)
+        if not unique_ids:
+            return {"success": True, "reason": "没有可重试的失败作品", "success_count": 0, "failed_count": 0, "skipped_count": len(skipped_ids)}
         failed_item_ids: list[str] = []
         task_id = (
             center.start(
@@ -338,7 +396,7 @@ class TaskCenterFacadeService:
                 "内容监控下载",
                 total=len(unique_ids),
                 retry_action="content_download_items",
-                retry_payload={"account_id": account_id, "item_ids": unique_ids},
+                retry_payload={"account_id": account_id, "item_ids": unique_ids, "retryable_only": retryable_only},
             )
             if center is not None
             else None
@@ -377,7 +435,10 @@ class TaskCenterFacadeService:
             return {"success": False, "reason": str(exc), "success_count": success, "failed_count": failed}
         if center is not None and task_id:
             center.finish(task_id, success=failed == 0, detail=f"重试完成：成功 {success}，失败 {failed}")
-        return {"success": failed == 0, "success_count": success, "failed_count": failed}
+        reason = f"重试完成：成功 {success}，失败 {failed}"
+        if skipped_ids:
+            reason += f"；跳过不可重试 {len(skipped_ids)} 个"
+        return {"success": failed == 0, "reason": reason, "success_count": success, "failed_count": failed, "skipped_count": len(skipped_ids)}
 
     @staticmethod
     def payload_retry_item_ids(payload: dict[str, Any]) -> list[str]:

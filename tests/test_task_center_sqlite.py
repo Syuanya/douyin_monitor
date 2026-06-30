@@ -44,3 +44,26 @@ class TaskCenterSQLiteTest(unittest.TestCase):
             self.assertGreaterEqual(store.task_record_count(), 2)
             mirror = json.loads(storage_path.read_text(encoding="utf-8"))
             self.assertEqual(mirror["records"][0]["title"], "New task")
+
+    def test_task_center_persists_cancel_action_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteStore(temp_dir)
+            center = TaskCenter(sqlite_store=store)
+
+            task_id = center.start(
+                "Auto download",
+                category="自动下载",
+                cancel_action="content_auto_download",
+                cancel_payload={"account_id": "a1", "task_key": "a1:i1"},
+            )
+
+            snapshot = center.snapshot()[0]
+            self.assertEqual(snapshot["task_id"], task_id)
+            self.assertEqual(snapshot["cancel_action"], "content_auto_download")
+            self.assertEqual(snapshot["cancel_payload"], {"account_id": "a1", "task_key": "a1:i1"})
+
+            restored = TaskCenter(sqlite_store=store)
+            restored_snapshot = restored.snapshot()[0]
+            self.assertEqual(restored_snapshot["cancel_action"], "content_auto_download")
+            self.assertEqual(restored_snapshot["cancel_payload"]["task_key"], "a1:i1")
+

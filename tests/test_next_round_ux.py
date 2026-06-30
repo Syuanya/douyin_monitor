@@ -26,7 +26,7 @@ def test_video_parse_input_summary_uses_link_digest() -> None:
 
 
 def test_content_monitor_batch_settings_are_checkbox_guarded() -> None:
-    text = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+    text = (ROOT / "app/ui/views/douyin_content_batch_settings_controller.py").read_text(encoding="utf-8")
 
     assert "修改分组" in text
     assert "修改自动下载策略" in text

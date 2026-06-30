@@ -33,14 +33,17 @@ class MonitorNicknameHydrationTest(unittest.TestCase):
         self.assertIn("profile_info_matches and profile_info.get(\"douyin_nickname\") and not douyin_nickname", text)
 
     def test_batch_import_hydrates_missing_names(self) -> None:
-        text = Path("app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+        view_text = Path("app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+        controller_text = Path("app/ui/views/douyin_content_batch_import_controller.py").read_text(encoding="utf-8")
+        text = view_text + "\n" + controller_text
 
-        self.assertIn("if not row.name:", text)
-        batch_block = text.split("async def show_batch_import_dialog", 1)[1].split("def _parse_batch_import_rows", 1)[0]
+        self.assertIn("if not row.name:", controller_text)
+        batch_block = controller_text.split("async def submit", 1)[1].split("async def show_text_report_dialog", 1)[0]
         self.assertIn("hydrate_account_ids.append(account.account_id)", batch_block)
-        self.assertIn("self._schedule_batch_name_hydration(hydrate_account_ids)", batch_block)
-        self.assertNotIn("await self.manager.hydrate_account_display_name(account.account_id, force=True)", batch_block)
-        self.assertIn("async def _hydrate_batch_account_names", text)
+        self.assertIn("self.schedule_name_hydration(hydrate_account_ids)", batch_block)
+        self.assertNotIn("await owner.manager.hydrate_account_display_name(account.account_id, force=True)", batch_block)
+        self.assertIn("async def _hydrate_batch_account_names", view_text)
+        self.assertIn("await self.batch_import_controller.hydrate_account_names(account_ids)", view_text)
 
     def test_headers_can_disable_cookie_for_identity_fetch(self) -> None:
         text = "\n".join([

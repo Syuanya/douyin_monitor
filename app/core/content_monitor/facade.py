@@ -58,6 +58,8 @@ class DouyinContentMonitorManager(
         self._account_scan_locks: dict[str, asyncio.Lock] = {}
         self._persist_task: asyncio.Task | None = None
         self._periodic_task: asyncio.Task | None = None
+        self._auto_download_tasks: dict[str, asyncio.Task] = {}
+        self._auto_download_task_meta: dict[str, dict[str, Any]] = {}
         self._persist_lock = asyncio.Lock()
         self._last_persist_at = 0.0
         self._persist_debounce_seconds = 1.5

@@ -471,6 +471,15 @@ class TaskCenterPage(PageBase):
                     on_click=lambda e, task=record: self.run_async(self.retry_task(task)),
                 )
             )
+        if bool(record.get("is_active")) and record.get("cancel_action"):
+            actions.append(
+                ft.TextButton(
+                    "取消",
+                    icon=ft.Icons.CANCEL_OUTLINED,
+                    on_click=lambda e, task=record: self.run_async(self.cancel_task(task)),
+                    style=ft.ButtonStyle(color=ft.Colors.ERROR),
+                )
+            )
         actions.append(
             ft.TextButton(
                 "详情",
@@ -501,6 +510,17 @@ class TaskCenterPage(PageBase):
                 ],
                 spacing=6,
             ),
+        )
+
+
+    async def cancel_task(self, record: dict[str, Any]) -> None:
+        result = await self.task_service.cancel_record(record)
+        await self.load()
+        await self.app.snack_bar.show_snack_bar(
+            str(result.get("reason") or ("任务已取消" if result.get("success") else "取消失败")),
+            bgcolor=ft.Colors.PRIMARY if result.get("success") else ft.Colors.ERROR,
+            duration=6000,
+            show_close_icon=True,
         )
 
     async def retry_task(self, record: dict[str, Any]) -> None:

@@ -5,15 +5,11 @@ from typing import Any
 import flet as ft
 
 from ..common.safe_icons import icon
+from ...views import douyin_content_state as content_state
 
 
 def is_gallery_item(item: Any) -> bool:
-    return bool(getattr(item, "image_urls", None)) or str(getattr(item, "media_type", "") or "").lower() in {
-        "image",
-        "images",
-        "gallery",
-        "note",
-    }
+    return content_state.is_gallery_item(item)
 
 
 def work_status_chip(page: Any, item: Any) -> ft.Container:
@@ -183,7 +179,12 @@ def create_inbox_item(page: Any, account: Any, item: Any) -> ft.Container:
         actions.append(_icon_action(ft.Icons.CLOUD_SYNC, "重新同步该账号作品", lambda e, account_id=account.account_id: page.run_async(page.sync_works(account_id))))
     else:
         actions.append(_icon_action(ft.Icons.IMAGE_SEARCH if gallery else ft.Icons.PLAY_CIRCLE_OUTLINE, "预览图集" if gallery else "预览视频", lambda e, account_id=account.account_id, item_id=item.item_id, gallery=gallery: page.run_async(page.preview_inbox_item(account_id, item_id, gallery))))
-        actions.append(_icon_action(ft.Icons.DOWNLOAD, "下载作品", lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.download_inbox_item(account_id, item_id))))
+        if str(getattr(item, "status", "") or "") == "download_failed":
+            actions.append(_icon_action(ft.Icons.REPLAY, "重试下载", lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.download_inbox_item(account_id, item_id))))
+        else:
+            actions.append(_icon_action(ft.Icons.DOWNLOAD, "下载作品", lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.download_inbox_item(account_id, item_id))))
+        if str(getattr(item, "status", "") or "") == "downloaded":
+            actions.append(_icon_action(ft.Icons.FOLDER_OPEN, "打开下载位置", lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.open_inbox_item_download_location(account_id, item_id))))
     actions.append(_icon_action(ft.Icons.DONE, "标记已处理", lambda e, account_id=account.account_id, item_id=item.item_id: page.run_async(page.mark_item_seen(account_id, item_id))))
     details = [
         ft.Row(
@@ -197,6 +198,15 @@ def create_inbox_item(page: Any, account: Any, item: Any) -> ft.Container:
         ft.Text(f"ID: {item_id}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
         ft.Text(f"首次发现：{first_seen}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
     ]
+    failure_reason = str(getattr(item, "failure_reason", "") or "").strip()
+    if failure_reason:
+        details.append(ft.Text(f"失败原因：{_short_text(failure_reason, 80)}", size=11, color=ft.Colors.ERROR, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        next_step = str(getattr(item, "failure_next_step", "") or "").strip()
+        if next_step:
+            details.append(ft.Text(f"建议：{_short_text(next_step, 80)}", size=11, color=ft.Colors.ORANGE, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+    download_path = str(getattr(item, "download_path", "") or "").strip()
+    if download_path and str(getattr(item, "status", "") or "") == "downloaded":
+        details.append(ft.Text(f"保存：{_short_text(download_path, 70)}", size=11, color=ft.Colors.GREEN, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS))
     if count_only:
         details.append(ft.Text("检测到数量变化，请重新同步获取具体作品。", size=11, color=ft.Colors.ORANGE, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
     return ft.Container(
@@ -242,6 +252,7 @@ def create_account_card(page: Any, account: Any) -> ft.Container:
         f"{page._.get('status', '状态')}：{account.status}",
         f"{page._.get('last_check', '最近检测')}：{account.last_check_time or '-'}",
         f"{page._.get('last_success', '最近成功')}：{account.last_success_time or '-'}",
+        f"下一次检测：{page.account_next_check_time(account)} / 连续失败：{getattr(account, 'error_count', 0) or 0}",
         (
             f"{page._.get('works', '作品')}：{len(account.items)}"
             f"{f' / 资料总数 {account.aweme_count}' if getattr(account, 'aweme_count', -1) >= 0 else ''}"
@@ -319,10 +330,25 @@ def create_history_item(page: Any, item: Any) -> ft.Container:
         _icon_action(ft.Icons.CONTENT_COPY, page._.get("copy_work", "复制作品链接"), lambda e, url=item.share_url: page.run_async(page.copy_text(url))),
         _icon_action(ft.Icons.INFO_OUTLINE, "详情", lambda e, item_id=item.item_id: page.run_async(page.show_work_detail(item_id))),
         _icon_action(ft.Icons.IMAGE_SEARCH if gallery else ft.Icons.PLAY_CIRCLE_OUTLINE, "预览图集" if gallery else page._.get("browse_video", "浏览视频"), (lambda e, item_id=item.item_id: page.run_async(page.preview_item_images(item_id))) if gallery else (lambda e, item_id=item.item_id: page.run_async(page.browse_video(item_id)))),
-        _icon_action(ft.Icons.DOWNLOAD, page._.get("download_work", "下载作品"), lambda e, item_id=item.item_id: page.run_async(page.download_one(item_id))),
+        _icon_action(ft.Icons.REPLAY if str(getattr(item, "status", "") or "") == "download_failed" else ft.Icons.DOWNLOAD, "重试下载" if str(getattr(item, "status", "") or "") == "download_failed" else page._.get("download_work", "下载作品"), lambda e, item_id=item.item_id: page.run_async(page.download_one(item_id))),
     ]
     if getattr(item, "status", "") == "downloaded":
         actions.append(_icon_action(ft.Icons.FOLDER_OPEN, "打开下载位置", lambda e, item_id=item.item_id: page.run_async(page.open_item_download_location(item_id))))
+    meta_controls: list[ft.Control] = [
+        ft.Text(f"ID: {item_id}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+        ft.Text(f"发布时间：{publish_time}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+        ft.Text(f"首次发现：{first_seen}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+    ]
+    failure_reason = str(getattr(item, "failure_reason", "") or "").strip()
+    if failure_reason:
+        meta_controls.append(ft.Text(f"失败原因：{_short_text(failure_reason, 80)}", size=11, color=ft.Colors.ERROR, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+        next_step = str(getattr(item, "failure_next_step", "") or "").strip()
+        if next_step:
+            meta_controls.append(ft.Text(f"建议：{_short_text(next_step, 80)}", size=11, color=ft.Colors.ORANGE, max_lines=2, overflow=ft.TextOverflow.ELLIPSIS))
+    download_path = str(getattr(item, "download_path", "") or "").strip()
+    if download_path and str(getattr(item, "status", "") or "") == "downloaded":
+        meta_controls.append(ft.Text(f"保存：{_short_text(download_path, 70)}", size=11, color=ft.Colors.GREEN, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS))
+
     return ft.Container(
         padding=8,
         border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
@@ -343,9 +369,7 @@ def create_history_item(page: Any, item: Any) -> ft.Container:
                             spacing=4,
                             vertical_alignment=ft.CrossAxisAlignment.START,
                         ),
-                        ft.Text(f"ID: {item_id}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Text(f"发布时间：{publish_time}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                        ft.Text(f"首次发现：{first_seen}", size=11, color=ft.Colors.ON_SURFACE_VARIANT, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                        *meta_controls,
                         ft.Row(controls=actions[:4], spacing=2, wrap=True),
                         ft.Row(controls=actions[4:], spacing=2, wrap=True),
                     ],

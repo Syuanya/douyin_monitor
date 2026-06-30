@@ -55,11 +55,22 @@ class ContentMonitorAccountMixin:
     async def persist(self, force: bool = False) -> None:
         now = time.monotonic()
         if force or now - self._last_persist_at >= self._persist_debounce_seconds:
-            if self._persist_task and not self._persist_task.done():
-                self._persist_task.cancel()
+            await self._cancel_pending_persist_task()
             await self._persist_now()
             return
         self._schedule_persist()
+
+    async def _cancel_pending_persist_task(self) -> None:
+        task = self._persist_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        if task is asyncio.current_task():
+            return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _schedule_persist(self) -> None:
         if self._persist_task and not self._persist_task.done():
@@ -70,8 +81,12 @@ class ContentMonitorAccountMixin:
             self._save_accounts_sync()
 
     async def _delayed_persist(self) -> None:
-        await asyncio.sleep(self._persist_debounce_seconds)
-        await self._persist_now()
+        try:
+            await asyncio.sleep(self._persist_debounce_seconds)
+            await self._persist_now()
+        finally:
+            if self._persist_task is asyncio.current_task():
+                self._persist_task = None
 
     async def _persist_now(self) -> None:
         accounts = [account.to_dict() for account in self._accounts]
@@ -80,9 +95,17 @@ class ContentMonitorAccountMixin:
             self._last_persist_at = time.monotonic()
 
     async def flush_persist(self) -> None:
-        if self._persist_task and not self._persist_task.done():
-            self._persist_task.cancel()
+        await self._cancel_pending_persist_task()
         await self._persist_now()
+
+    def persist_status(self) -> dict[str, Any]:
+        task = self._persist_task
+        return {
+            "pending": bool(task is not None and not task.done()),
+            "last_persist_at": float(getattr(self, "_last_persist_at", 0.0) or 0.0),
+            "debounce_seconds": float(getattr(self, "_persist_debounce_seconds", 0.0) or 0.0),
+            "lock_active": bool(getattr(getattr(self, "_persist_lock", None), "locked", lambda: False)()),
+        }
 
     @staticmethod
     def normalize_homepage_url(raw_url: str) -> str:

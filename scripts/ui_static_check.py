@@ -143,6 +143,8 @@ def main() -> int:
             errors.append(f"home dashboard runtime marker missing: {marker}")
 
     content_view_text = (ROOT / "app/ui/views/douyin_content_view.py").read_text(encoding="utf-8")
+    content_export_text = (ROOT / "app/ui/views/douyin_content_export_controller.py").read_text(encoding="utf-8")
+    content_preview_text = (ROOT / "app/ui/views/douyin_content_preview_controller.py").read_text(encoding="utf-8")
     content_monitor_text = "\n".join((ROOT / path).read_text(encoding="utf-8") for path in (
         "app/core/content_monitor/douyin_content_monitor.py",
         "app/core/content_monitor/facade.py",
@@ -156,11 +158,11 @@ def main() -> int:
         errors.append("douyin content render guard missing: background downloads may redraw another page")
     if "self.content_area.update()" in content_view_text:
         errors.append("douyin content view should use safe_content_update to avoid background redraws")
-    if "VideoPlayer(self.app).preview_video" not in content_view_text:
+    if "VideoPlayer(owner.app).preview_video" not in content_preview_text:
         errors.append("douyin content video preview should use the legacy modal VideoPlayer")
-    if "export_monitor_accounts_csv" not in content_view_text or "douyin_monitor_accounts_" not in content_view_text:
+    if "export_monitor_accounts_csv" not in content_view_text or "douyin_monitor_accounts" not in content_export_text:
         errors.append("douyin content account-level monitor export missing")
-    if 'copy_source_url=result.get("copy_source_url") or source_url' not in content_view_text:
+    if 'copy_source_url=result.get("copy_source_url") or source_url' not in content_preview_text:
         errors.append("douyin content preview should preserve original direct URL when cached locally")
     if "create_content_video_preview" in content_view_text or "content_video_preview" in content_view_text:
         errors.append("douyin content inline video preview should be disabled; storage owns inline switching")

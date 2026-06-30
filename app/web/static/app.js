@@ -267,13 +267,19 @@ function renderInboxItem(item) {
   const key = itemKey(item.account_id, item.item_id);
   const checked = state.selectedItems.has(key) ? 'checked' : '';
   const title = item.title || item.description || item.item_id;
-  const status = item.status === 'count_only' ? '数量变化' : '新作品';
+  const status = item.status === 'count_only' ? '数量变化' : item.status === 'download_failed' ? '下载失败' : '新作品';
+  const badgeClass = item.status === 'count_only' ? 'warn' : item.status === 'download_failed' ? 'danger' : 'ok';
+  const downloadText = item.status === 'download_failed' ? '重试下载' : '下载';
+  const failure = item.failure_reason ? `<p class="hint danger">失败原因：${escapeHtml(item.failure_reason)}</p>` : '';
+  const failureAdvice = item.failure_next_step ? `<p class="hint warn">建议：${escapeHtml(item.failure_next_step)}</p>` : '';
+  const saved = item.download_path ? `<p class="hint">保存位置：${escapeHtml(item.download_path)}</p>` : '';
   return `<div class="card">
-    <div class="card-title"><label class="check strong"><input type="checkbox" class="inboxSelect" data-key="${escapeHtml(key)}" ${checked}/> ${escapeHtml(truncate(title, 96))}</label>${badge(status, item.status === 'count_only' ? 'warn' : 'ok')}</div>
+    <div class="card-title"><label class="check strong"><input type="checkbox" class="inboxSelect" data-key="${escapeHtml(key)}" ${checked}/> ${escapeHtml(truncate(title, 96))}</label>${badge(status, badgeClass)}</div>
     <p>账号：${escapeHtml(item.account_name || '-')} ｜ 作品ID：${escapeHtml(item.item_id || '')}</p>
     <p class="hint">${escapeHtml(item.share_url || item.account_homepage_url || '')}</p>
+    ${failure}${failureAdvice}${saved}
     <div class="card-actions">
-      <button onclick="downloadItems([{account_id:'${item.account_id}', item_id:'${item.item_id}'}])">下载</button>
+      <button onclick="downloadItems([{account_id:'${item.account_id}', item_id:'${item.item_id}'}])">${downloadText}</button>
       <button onclick="markSeen([{account_id:'${item.account_id}', item_id:'${item.item_id}'}])">标记已处理</button>
     </div>
   </div>`;
@@ -410,7 +416,7 @@ async function loadTasks() {
     const data = await api('/api/tasks'); const records = data.records || []; const jobs = data.web_jobs || [];
     $('taskList').innerHTML = [
       ...jobs.map(j => `<div class="card"><div class="card-title"><strong>${escapeHtml(j.title)}</strong>${badge(j.status, j.status==='failed'?'danger':j.status==='completed'?'ok':'')}</div><p>创建：${fmtTime(j.created_at)} ｜ 更新：${fmtTime(j.updated_at)}</p><div class="card-actions">${j.status==='running'?`<button onclick="cancelJob('${j.job_id}')" class="danger">取消</button>`:''}</div><pre>${escapeHtml(JSON.stringify(j.result || j.error || {}, null, 2))}</pre></div>`),
-      ...records.map(t => { const active=['运行中','等待中','running','pending'].includes(t.status); return `<div class="card"><div class="card-title"><strong>${escapeHtml(t.title)}</strong>${badge(t.status, t.status==='failed'?'danger':t.status==='completed'?'ok':'')}</div><p>${escapeHtml(t.detail || '')}</p><p>进度：${t.completed || 0}/${t.total || 0} 成功 ${t.success_count || 0} 失败 ${t.failed_count || 0}</p><div class="card-actions"><button onclick="cancelTaskRecord('${t.task_id}')" ${active?'disabled title="运行中任务请使用下载队列取消"':''}>${active?'运行中不可只取消记录':'标记取消记录'}</button>${t.retry_action?`<button onclick="retryTaskRecord('${t.task_id}')">重试</button>`:''}</div></div>`; })
+      ...records.map(t => { const active=['运行中','等待中','running','pending'].includes(t.status); const canCancel=!!t.cancel_action; const cancelDisabled=active && !canCancel; const cancelText=active?(canCancel?'取消任务':'运行中不可只取消记录'):'标记取消记录'; return `<div class="card"><div class="card-title"><strong>${escapeHtml(t.title)}</strong>${badge(t.status, t.status==='failed'?'danger':t.status==='completed'?'ok':'')}</div><p>${escapeHtml(t.detail || '')}</p><p>进度：${t.completed || 0}/${t.total || 0} 成功 ${t.success_count || 0} 失败 ${t.failed_count || 0}</p><div class="card-actions"><button onclick="cancelTaskRecord('${t.task_id}')" ${cancelDisabled?'disabled title="运行中任务未提供安全取消入口"':''}>${cancelText}</button>${t.retry_action?`<button onclick="retryTaskRecord('${t.task_id}')">重试</button>`:''}</div></div>`; })
     ].join('') || '<div class="panel">暂无任务。</div>';
   } catch (e) { toast(`加载任务失败：${e.message}`); }
 }

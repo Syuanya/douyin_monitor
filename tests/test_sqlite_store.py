@@ -96,3 +96,25 @@ class SQLiteStoreTest(unittest.TestCase):
             deleted = store.delete_download_records(statuses=["completed"])
             self.assertEqual(deleted, 2)
             self.assertEqual(store.download_record_count(), 1)
+
+    def test_monitor_account_save_handles_large_item_sets_without_sql_variable_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteStore(temp_dir)
+            items = [
+                {
+                    "item_id": f"item-{index}",
+                    "title": f"work-{index}",
+                    "status": "active",
+                    "media_type": "video",
+                }
+                for index in range(1200)
+            ]
+            store.save_monitor_accounts([{"account_id": "a1", "homepage_url": "https://www.douyin.com/user/x", "items": items}])
+            loaded = store.load_monitor_accounts()
+            self.assertEqual(len(loaded[0]["items"]), 1200)
+
+            trimmed = items[:1100]
+            store.save_monitor_accounts([{"account_id": "a1", "homepage_url": "https://www.douyin.com/user/x", "items": trimmed}])
+            loaded = store.load_monitor_accounts()
+            self.assertEqual(len(loaded[0]["items"]), 1100)
+

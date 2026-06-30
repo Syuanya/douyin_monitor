@@ -41,6 +41,8 @@ class TaskRecord:
     finished_at: str = ""
     retry_action: str = ""
     retry_payload: dict[str, Any] = field(default_factory=dict)
+    cancel_action: str = ""
+    cancel_payload: dict[str, Any] = field(default_factory=dict)
 
 
 def classify_failure(reason: str) -> dict[str, str]:
@@ -72,6 +74,8 @@ class TaskCenter:
         total: int = 0,
         retry_action: str = "",
         retry_payload: dict[str, Any] | None = None,
+        cancel_action: str = "",
+        cancel_payload: dict[str, Any] | None = None,
     ) -> str:
         now = self._now()
         record = TaskRecord(
@@ -85,6 +89,8 @@ class TaskCenter:
             updated_at=now,
             retry_action=str(retry_action or ""),
             retry_payload=dict(retry_payload or {}),
+            cancel_action=str(cancel_action or ""),
+            cancel_payload=dict(cancel_payload or {}),
         )
         with self._lock:
             self._records.insert(0, record)
@@ -109,6 +115,8 @@ class TaskCenter:
                         pass
             if isinstance(updates.get("retry_payload"), dict):
                 record.retry_payload = dict(updates["retry_payload"])
+            if isinstance(updates.get("cancel_payload"), dict):
+                record.cancel_payload = dict(updates["cancel_payload"])
             record.updated_at = self._now()
             self._save_locked()
 
@@ -118,6 +126,16 @@ class TaskCenter:
             if record is None:
                 return
             record.retry_payload = dict(retry_payload or {})
+            record.updated_at = self._now()
+            self._save_locked(force=True)
+
+
+    def update_cancel_payload(self, task_id: str, cancel_payload: dict[str, Any]) -> None:
+        with self._lock:
+            record = self._find_locked(task_id)
+            if record is None:
+                return
+            record.cancel_payload = dict(cancel_payload or {})
             record.updated_at = self._now()
             self._save_locked(force=True)
 
@@ -227,6 +245,7 @@ class TaskCenter:
                 values["task_id"] = str(values.get("task_id") or uuid.uuid4().hex)
                 values["title"] = str(values.get("title") or "未命名任务")
                 values["retry_payload"] = values.get("retry_payload") if isinstance(values.get("retry_payload"), dict) else {}
+                values["cancel_payload"] = values.get("cancel_payload") if isinstance(values.get("cancel_payload"), dict) else {}
                 values["status"] = normalize_task_status(values.get("status"))
                 for key in ("total", "completed", "success_count", "failed_count"):
                     try:
@@ -255,6 +274,7 @@ class TaskCenter:
                 values["task_id"] = str(values.get("task_id") or uuid.uuid4().hex)
                 values["title"] = str(values.get("title") or "未命名任务")
                 values["retry_payload"] = values.get("retry_payload") if isinstance(values.get("retry_payload"), dict) else {}
+                values["cancel_payload"] = values.get("cancel_payload") if isinstance(values.get("cancel_payload"), dict) else {}
                 values["status"] = normalize_task_status(values.get("status"))
                 for key in ("total", "completed", "success_count", "failed_count"):
                     try:
