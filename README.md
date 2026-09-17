@@ -237,84 +237,9 @@ dist\installer\DouyinMonitorSetup-<version>.exe
 dist\update_manifest.json
 ```
 
-## 测试与检查
 
-基础检查：
 
-```bash
-python scripts/smoke_check.py --strict
-```
 
-运行测试：
-
-```bash
-python scripts/run_tests.py
-```
-
-创建安全源码发布包：
-
-```bash
-python scripts/package_release.py
-```
-
-执行完整发布闸门：
-
-```bash
-python scripts/release_gate.py --package --name douyin_monitor_release.zip
-```
-
-GitHub Actions 已提供 CI 和 Windows Release 自动发布流程：
-
-```text
-.github/workflows/ci.yml
-.github/workflows/release.yml
-```
-
-## GitHub 上传前检查清单
-
-上传前建议确认：
-
-- 不包含 `.git/`、`.venv/`、`build/`、`dist/`。
-- 不包含 `.env`、真实 Cookie、账号列表、监控记录、解析历史、任务记录。
-- 不包含 `data/`、`logs/`、`cache/`、`downloads/`、`diagnostics/`。
-- 不包含 `__pycache__/`、`.pytest_cache/`、`.ruff_cache/`。
-- `crawlers/*/config.yaml` 中的 `Cookie`、`msToken`、`ttwid.cookie` 等字段为空或由运行时生成。
-- README 截图中不暴露真实账号、Cookie、私密链接或下载路径。
-
-## 更新到 GitHub
-
-如果远程仓库已经存在：
-
-```bash
-git clone git@github.com:Syuanya/douyin_monitor.git
-cd douyin_monitor
-```
-
-把本项目文件复制到仓库目录后执行：
-
-```bash
-git status
-git add .
-git commit -m "Update douyin monitor project"
-git push origin main
-```
-
-如果当前远程仓库使用 `master` 分支，请把最后一行改成：
-
-```bash
-git push origin master
-```
-
-如果是第一次初始化仓库：
-
-```bash
-git init
-git branch -M main
-git remote add origin git@github.com:Syuanya/douyin_monitor.git
-git add .
-git commit -m "Initial commit"
-git push -u origin main
-```
 
 ## 风险说明
 
